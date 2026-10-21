@@ -1,0 +1,18 @@
+# Extends gitleaks' default rules with OCI identifiers, which the defaults miss.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "oci-ocid"
+description = "OCI resource identifier (tenancy, compartment, user, instance...)"
+regex = '''ocid1\.[a-z0-9]+\.oc[0-9]+\.[a-z0-9-]*\.[a-z0-9]{20,}'''
+
+[[rules]]
+id = "oci-object-storage-namespace-url"
+description = "Object Storage URL that reveals the tenancy namespace"
+regex = '''objectstorage\.[a-z0-9-]+\.oraclecloud\.com/n/[a-z0-9]+'''
+
+[[rules]]
+id = "oci-api-key-fingerprint"
+description = "OCI API signing key fingerprint"
+regex = '''fingerprint\s*=\s*"?([0-9a-f]{2}:){15}[0-9a-f]{2}'''
