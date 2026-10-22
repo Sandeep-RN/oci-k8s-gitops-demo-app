@@ -15,4 +15,4 @@ regex = '''objectstorage\.[a-z0-9-]+\.oraclecloud\.com/n/[a-z0-9]+'''
 [[rules]]
 id = "oci-api-key-fingerprint"
 description = "OCI API signing key fingerprint"
-regex = '''fingerprint\s*=\s*"?([0-9a-f]{2}:){15}[0-9a-f]{2}'''
+regex = '''fingerprint\s*=\s*"?((?:[0-9a-f]{2}:){15}[0-9a-f]{2})'''
