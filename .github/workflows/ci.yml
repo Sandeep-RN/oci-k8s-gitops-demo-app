@@ -11,7 +11,9 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded PR runs only. On main, every run must finish so its
+  # image and tag bump are not cut off halfway.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -41,12 +43,18 @@ jobs:
       packages: write # push to GHCR (main only; the step is skipped on PRs)
     env:
       REGISTRY: ghcr.io
+    outputs:
+      image: ${{ steps.image.outputs.image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # GHCR requires a lowercase repository path; github.repository may not be.
       - name: Compute image name
-        run: echo "IMAGE=${REGISTRY}/${GITHUB_REPOSITORY,,}-backend" >> "$GITHUB_ENV"
+        id: image
+        run: |
+          image="${REGISTRY}/${GITHUB_REPOSITORY,,}-backend"
+          echo "IMAGE=${image}" >> "$GITHUB_ENV"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -89,3 +97,85 @@ jobs:
           tags: ${{ env.IMAGE }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ADR 0009: open a PR in the gitops repo that sets the new image tag, with
+  # auto-merge on. It merges only after the gitops repo's required `validate`
+  # check passes; ArgoCD then syncs. CI never talks to a cluster.
+  bump-gitops:
+    needs: image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {} # everything below uses GITOPS_TOKEN, not GITHUB_TOKEN
+    # One bump at a time, never cancelled, so two quick merges cannot race.
+    concurrency:
+      group: bump-gitops
+      cancel-in-progress: false
+    env:
+      GITOPS_REPO: Sandeep-RN/oci-k8s-gitops-demo-gitops
+      KUSTOMIZATION: apps/link-shortener/base/kustomization.yaml
+      IMAGE: ${{ needs.image.outputs.image }}
+      TAG: ${{ github.sha }}
+      # Fine-grained PAT limited to the gitops repo: contents + pull requests write.
+      GH_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ secrets.GITOPS_TOKEN }}
+          path: gitops
+
+      - name: Set image tag
+        id: bump
+        working-directory: gitops
+        run: |
+          set -euo pipefail
+          # yq is preinstalled on GitHub's Ubuntu runners. Matching on the image
+          # name (not a line number) keeps this correct if the file is reordered.
+          yq -i '(.images[] | select(.name == strenv(IMAGE))) |= (.newTag = strenv(TAG) | .newTag line_comment = "")' "$KUSTOMIZATION"
+          grep -q "newTag: ${TAG}" "$KUSTOMIZATION" || { echo "image ${IMAGE} not found in ${KUSTOMIZATION}"; exit 1; }
+          if git diff --quiet; then
+            echo "Tag already ${TAG}; nothing to do (re-run?)."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open auto-merging PR and close superseded ones
+        if: steps.bump.outputs.changed == 'true'
+        working-directory: gitops
+        run: |
+          set -euo pipefail
+          short="${TAG::12}"
+          branch="bump/backend-${short}"
+          git config user.name "oci-k8s-gitops-demo-app CI"
+          git config user.email "noreply@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "Bump backend image to ${short}" \
+            -m "From ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${TAG}"
+          # --force-with-lease makes a workflow re-run idempotent.
+          git push --force-with-lease -u origin "$branch"
+
+          gh label create tag-bump --repo "$GITOPS_REPO" --color 0E8A16 \
+            --description "Automated image tag bump (ADR 0009)" --force >/dev/null
+
+          pr="$(gh pr list --repo "$GITOPS_REPO" --head "$branch" --state open \
+            --json url --jq '.[0].url')"
+          if [ -z "$pr" ]; then
+            body="Automated tag bump (ADR 0009) from ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${TAG}."
+            body+=" Auto-merges when the validate check passes; ArgoCD then syncs."
+            pr="$(gh pr create --repo "$GITOPS_REPO" --head "$branch" --base main \
+              --label tag-bump --title "Bump backend image to ${short}" --body "$body")"
+          fi
+          # Squash keeps gitops main linear (required by branch protection).
+          gh pr merge "$pr" --repo "$GITOPS_REPO" --auto --squash --delete-branch
+          echo "Opened ${pr}"
+
+          # Older open bumps would conflict with this one and deploy stale tags.
+          gh pr list --repo "$GITOPS_REPO" --label tag-bump --state open \
+            --json number,headRefName \
+            --jq ".[] | select(.headRefName != \"${branch}\") | .number" |
+          while read -r old; do
+            gh pr close "$old" --repo "$GITOPS_REPO" --delete-branch \
+              --comment "Superseded by ${pr}."
+          done

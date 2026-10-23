@@ -3,8 +3,8 @@
 Application code and CI for the OCI Kubernetes GitOps demo: a small **link
 shortener** with a FastAPI backend, a static frontend and PostgreSQL storage.
 
-> **Status:** scaffolding only. Backend, frontend and workflows are not
-> written yet (Phase 1 starts with the backend skeleton, built test-first).
+> **Status:** backend skeleton (`/healthz`, `/readyz`, Dockerfile) with full CI
+> and the GitOps tag bump. Link endpoints and the frontend are not written yet.
 
 Part of a three-repo project. Architecture, ADRs and the issue tracker live in
 [oci-k8s-gitops-demo](https://github.com/Sandeep-RN/oci-k8s-gitops-demo);
@@ -20,12 +20,29 @@ frontend/               Static frontend
 .github/workflows/      CI
 ```
 
-## Planned CI (ADR 0009)
+## CI (ADR 0009)
 
-On each change: lint, test, Trivy scan, build an arm64 image, push it to GHCR
-tagged with the git SHA (tags are immutable), then open an auto-merging
-tag-bump PR in the gitops repo. ArgoCD deploys from there; CI never touches
-the cluster.
+On every PR: lint, test, a Trivy scan and a multi-arch (amd64 + arm64) build
+without pushing (ADR 0015). On `main` it also:
+
+1. pushes the image to GHCR, tagged with the git SHA (tags are immutable), and
+2. opens a PR in the gitops repo that sets that tag, with auto-merge on. The PR
+   merges once the gitops `validate` check passes; ArgoCD then deploys it.
+   Older open bump PRs are closed as superseded.
+
+CI never talks to a cluster. The cross-repo step uses `GITOPS_TOKEN`, a
+fine-grained token limited to the gitops repo (contents and pull requests:
+write). Rotate it before it expires.
+
+## Run locally
+
+```
+cd backend
+python -m venv .venv && .venv/Scripts/activate   # Linux/macOS: source .venv/bin/activate
+pip install -r requirements-dev.txt
+pytest && ruff check . && ruff format --check .
+docker build -t link-shortener:dev . && docker run --rm -p 8000:8000 link-shortener:dev
+```
 
 ## Working here
 
