@@ -2,3 +2,6 @@ fastapi==0.160.0
 # Pinned directly: older Starlette releases carry HIGH CVEs that the CI Trivy scan fails on.
 starlette==1.9.0
 uvicorn[standard]==0.54.0
+# Binary wheels include libpq for amd64 and arm64 (no compiler in the image).
+psycopg[binary]==3.3.6
+psycopg-pool==3.3.3
