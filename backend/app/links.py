@@ -4,6 +4,8 @@ import re
 import secrets
 import string
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol
@@ -80,3 +82,53 @@ class InMemoryLinkStore:
 
     def ready(self) -> bool:
         return True
+
+
+class TimeBoundedStore:
+    """Puts a hard time limit around every call to another store.
+
+    A database driver can block with no timeout of its own, for example when a
+    pooled connection points at a server that froze or vanished. Rather than
+    trust every code path in the driver, each call runs on a worker thread and
+    the caller gives up after `timeout`, answering with StoreUnavailable (a 503).
+    Stuck workers are bounded: once all are busy, new calls fail immediately
+    instead of queueing behind them.
+    """
+
+    def __init__(
+        self,
+        inner: LinkStore,
+        timeout: float,
+        ready_timeout: float,
+        workers: int = 16,
+    ) -> None:
+        self._inner = inner
+        self._timeout = timeout
+        self._ready_timeout = ready_timeout
+        self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="store")
+        # One slot per worker; a slot is held until its call really finishes, so
+        # abandoned (stuck) calls keep counting against the limit.
+        self._slots = threading.BoundedSemaphore(workers)
+
+    def _run(self, fn, *args, timeout: float):
+        if not self._slots.acquire(blocking=False):
+            raise StoreUnavailable("all store workers are busy or stuck")
+        future: Future = self._executor.submit(fn, *args)
+        future.add_done_callback(lambda _f: self._slots.release())
+        try:
+            return future.result(timeout=timeout)
+        except FutureTimeout:
+            future.cancel()  # only helps if it never started
+            raise StoreUnavailable(f"store call exceeded {timeout:g}s") from None
+
+    def create(self, code: str, url: str) -> Link:
+        return self._run(self._inner.create, code, url, timeout=self._timeout)
+
+    def get(self, code: str) -> Link | None:
+        return self._run(self._inner.get, code, timeout=self._timeout)
+
+    def ready(self) -> bool:
+        try:
+            return bool(self._run(self._inner.ready, timeout=self._ready_timeout))
+        except StoreUnavailable:
+            return False

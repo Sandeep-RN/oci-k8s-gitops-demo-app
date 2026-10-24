@@ -21,9 +21,12 @@ shortener** with a FastAPI backend, a static frontend and PostgreSQL storage.
   to change.
 - **Codes** are 7 random base62 characters, with a unique key and retry on
   collision.
-- **A database outage** returns `503`, never `500`. Liveness stays up so
-  Kubernetes does not restart healthy pods; readiness takes them out of the
-  Service until Postgres is back.
+- **A database outage** returns `503`, never `500`, and fails fast: requests
+  answer within about 2 s (`PG_POOL_TIMEOUT`, default 2 s) and `/readyz` within
+  about 1.5 s. Every store call also runs under a hard time limit, because a
+  pooled connection to a frozen server can block the driver with no timeout of
+  its own. Liveness stays up so Kubernetes does not restart healthy pods;
+  readiness takes them out of the Service until Postgres is back.
 - **Configuration** comes from the standard libpq variables (`PGHOST`, `PGPORT`,
   `PGUSER`, `PGPASSWORD`, `PGDATABASE`). The table is created at startup under
   an advisory lock, so replicas can start together safely.

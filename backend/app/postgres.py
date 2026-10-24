@@ -6,6 +6,7 @@ password from a Secret without any app-specific config format.
 """
 
 import logging
+import os
 
 import psycopg
 from psycopg.errors import UniqueViolation
@@ -28,12 +29,35 @@ CREATE TABLE IF NOT EXISTS links (
 )
 """
 
+# How long a request waits for a free connection before failing with a 503.
+# Short on purpose: during an outage users and probes should get a quick error,
+# not a hung request. Override with PG_POOL_TIMEOUT (seconds).
+POOL_TIMEOUT_DEFAULT = 2.0
+# Readiness gets a tighter budget than requests, so it always answers inside
+# the kubelet probe's own timeout (set explicitly in the Deployment).
+READY_TIMEOUT = 1.0
+
 # Errors that mean "the database is not usable right now" rather than a bug.
 _UNAVAILABLE = (psycopg.OperationalError, PoolTimeout)
 
 
-def make_pool(conninfo: str = "", timeout: float = 5.0) -> ConnectionPool:
+def _pool_timeout() -> float:
+    raw = os.environ.get("PG_POOL_TIMEOUT")
+    if raw is None:
+        return POOL_TIMEOUT_DEFAULT
+    try:
+        value = float(raw)
+        if value <= 0:
+            raise ValueError(raw)
+        return value
+    except ValueError:
+        log.warning("ignoring invalid PG_POOL_TIMEOUT=%r", raw)
+        return POOL_TIMEOUT_DEFAULT
+
+
+def make_pool(conninfo: str = "", timeout: float | None = None) -> ConnectionPool:
     """Create a closed pool. Empty conninfo means "use the PG* environment"."""
+    timeout = _pool_timeout() if timeout is None else timeout
     return ConnectionPool(
         conninfo,
         min_size=1,
@@ -43,7 +67,20 @@ def make_pool(conninfo: str = "", timeout: float = 5.0) -> ConnectionPool:
         # Validate a connection before handing it out, so a restarted Postgres
         # does not leave dead sockets in the pool.
         check=ConnectionPool.check_connection,
-        kwargs={"connect_timeout": 3, "application_name": "link-shortener"},
+        # A restarting Postgres can accept the TCP connection and then stay silent;
+        # without this a connection attempt can block a pool worker for a long time.
+        kwargs={
+            "connect_timeout": 2,
+            "application_name": "link-shortener",
+            # If the server's pod disappears, packets are silently dropped and a
+            # socket can wait for minutes. These make the kernel give up in a few
+            # seconds, so threads stuck on a dead connection are released.
+            "tcp_user_timeout": 5000,  # ms of unacknowledged data
+            "keepalives": 1,
+            "keepalives_idle": 5,
+            "keepalives_interval": 2,
+            "keepalives_count": 3,
+        },
     )
 
 
@@ -52,9 +89,9 @@ class PostgresLinkStore:
         self._pool = pool
         self._schema_ready = False
 
-    def ensure_schema(self) -> None:
+    def ensure_schema(self, timeout: float | None = None) -> None:
         try:
-            with self._pool.connection() as conn, conn.transaction():
+            with self._pool.connection(timeout=timeout) as conn, conn.transaction():
                 conn.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK_KEY,))
                 conn.execute(_SCHEMA)
         except _UNAVAILABLE as e:
@@ -66,8 +103,8 @@ class PostgresLinkStore:
         # while Postgres was down becomes ready once it is reachable.
         try:
             if not self._schema_ready:
-                self.ensure_schema()
-            with self._pool.connection() as conn:
+                self.ensure_schema(timeout=READY_TIMEOUT)
+            with self._pool.connection(timeout=READY_TIMEOUT) as conn:
                 conn.execute("SELECT 1")
             return True
         except (StoreUnavailable, *_UNAVAILABLE) as e:

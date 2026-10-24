@@ -9,7 +9,14 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import AfterValidator, AnyHttpUrl, BaseModel
 
 from app import links
-from app.links import CODE_PATTERN, CodeCollision, InMemoryLinkStore, LinkStore, StoreUnavailable
+from app.links import (
+    CODE_PATTERN,
+    CodeCollision,
+    InMemoryLinkStore,
+    LinkStore,
+    StoreUnavailable,
+    TimeBoundedStore,
+)
 
 log = logging.getLogger("app")
 
@@ -116,22 +123,25 @@ def create_app(
 
 def create_production_app() -> FastAPI:
     # Imported here so tests that never touch Postgres do not need psycopg.
-    from app.postgres import PostgresLinkStore, make_pool
+    from app.postgres import READY_TIMEOUT, PostgresLinkStore, make_pool
 
     pool = make_pool()
     pg_store = PostgresLinkStore(pool)
+    # Backstop for driver calls that can block with no timeout of their own.
+    # The pool's own timeout usually fires first with a clean error.
+    store = TimeBoundedStore(pg_store, timeout=pool.timeout, ready_timeout=READY_TIMEOUT + 0.5)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         # wait=False: the process starts (and passes liveness) even if Postgres
         # is down; readiness reports it and creates the schema once reachable.
         pool.open(wait=False)
-        if not pg_store.ready():
+        if not store.ready():
             log.warning("postgres not reachable at startup; will retry via /readyz")
         yield
         pool.close()
 
-    return create_app(store=pg_store, lifespan=lifespan)
+    return create_app(store=store, lifespan=lifespan)
 
 
 app = create_production_app()
