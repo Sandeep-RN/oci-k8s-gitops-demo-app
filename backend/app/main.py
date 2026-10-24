@@ -1,4 +1,5 @@
 import logging
+import os
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -6,6 +7,7 @@ from typing import Annotated
 
 from fastapi import FastAPI, HTTPException, Path, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse
+from prometheus_client import REGISTRY, CollectorRegistry
 from pydantic import AfterValidator, AnyHttpUrl, BaseModel
 
 from app import links
@@ -17,6 +19,7 @@ from app.links import (
     StoreUnavailable,
     TimeBoundedStore,
 )
+from app.metrics import RequestMetricsMiddleware, make_request_histogram, start_metrics_server
 
 log = logging.getLogger("app")
 
@@ -24,6 +27,7 @@ log = logging.getLogger("app")
 ReadinessCheck = Callable[[], bool]
 
 MAX_URL_LENGTH = 2048
+METRICS_PORT_DEFAULT = 9000
 
 
 def _max_length(url: AnyHttpUrl) -> AnyHttpUrl:
@@ -51,9 +55,14 @@ def create_app(
     readiness_checks: Sequence[ReadinessCheck] = (),
     store: LinkStore | None = None,
     lifespan: Callable[[FastAPI], AsyncIterator[None]] | None = None,
+    registry: CollectorRegistry | None = None,
 ) -> FastAPI:
     store = store if store is not None else InMemoryLinkStore()
     app = FastAPI(title="link-shortener", lifespan=lifespan)
+    # A private registry by default: metrics can only be registered once per
+    # registry, and tests build many apps. Production passes the global one.
+    histogram = make_request_histogram(registry if registry is not None else CollectorRegistry())
+    app.add_middleware(RequestMetricsMiddleware, histogram=histogram)
 
     @app.exception_handler(StoreUnavailable)
     async def store_unavailable(_: Request, exc: StoreUnavailable) -> JSONResponse:
@@ -130,18 +139,23 @@ def create_production_app() -> FastAPI:
     # Backstop for driver calls that can block with no timeout of their own.
     # The pool's own timeout usually fires first with a clean error.
     store = TimeBoundedStore(pg_store, timeout=pool.timeout, ready_timeout=READY_TIMEOUT + 0.5)
+    metrics_port = int(os.environ.get("METRICS_PORT", METRICS_PORT_DEFAULT))
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         # wait=False: the process starts (and passes liveness) even if Postgres
         # is down; readiness reports it and creates the schema once reachable.
+        # Started here, not at import, so importing the module binds no port.
+        _, stop_metrics = start_metrics_server(metrics_port, registry=REGISTRY)
         pool.open(wait=False)
         if not store.ready():
             log.warning("postgres not reachable at startup; will retry via /readyz")
         yield
         pool.close()
+        stop_metrics()
 
-    return create_app(store=store, lifespan=lifespan)
+    # The global registry also carries process metrics (memory, CPU, open fds).
+    return create_app(store=store, lifespan=lifespan, registry=REGISTRY)
 
 
 app = create_production_app()

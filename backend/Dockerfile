@@ -13,5 +13,6 @@ COPY app ./app
 RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin appuser
 USER 10001
 
-EXPOSE 8000
+# 8000: the app. 9000: Prometheus metrics, kept off the public Service.
+EXPOSE 8000 9000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
