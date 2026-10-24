@@ -36,12 +36,14 @@ def test_readiness_gives_up_within_its_own_budget(hung_store):
     assert time.monotonic() - start < READY_TIMEOUT + 0.5
 
 
-def test_readyz_returns_503_quickly(hung_store):
+def test_readyz_stays_ready_while_the_database_hangs(hung_store):
+    # ADR 0016: every replica shares the database, so failing readiness on it
+    # would empty the Service and turn fast 503s into refused connections.
     client = TestClient(create_app(store=hung_store))
     start = time.monotonic()
     r = client.get("/readyz")
-    assert r.status_code == 503
-    assert time.monotonic() - start < 2.0
+    assert r.status_code == 200
+    assert time.monotonic() - start < 0.5
 
 
 def test_api_calls_return_503_within_the_pool_timeout(hung_store):
@@ -140,6 +142,6 @@ def test_api_returns_503_on_schedule_when_the_store_hangs():
     client = TestClient(create_app(store=store), follow_redirects=False)
     start = time.monotonic()
     assert client.get("/AAAAAAA").status_code == 503
-    assert client.get("/readyz").status_code == 503
+    assert client.get("/readyz").status_code == 200
     assert client.get("/healthz").status_code == 200
     assert time.monotonic() - start < 1.5

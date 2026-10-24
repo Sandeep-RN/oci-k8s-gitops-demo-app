@@ -98,9 +98,16 @@ class PostgresLinkStore:
             raise StoreUnavailable(str(e)) from e
         self._schema_ready = True
 
+    def _ensure_schema_once(self) -> None:
+        # A pod that started while Postgres was down has no schema yet; its
+        # first request that reaches the database creates it. Cheap afterwards.
+        if not self._schema_ready:
+            self.ensure_schema()
+
     def ready(self) -> bool:
-        # Readiness creates the schema on first success, so a pod that started
-        # while Postgres was down becomes ready once it is reachable.
+        # "Is the database reachable right now?" Used at startup (and creates
+        # the schema on success). Not a readiness probe: the database is shared
+        # by every replica, so /readyz must not depend on it (ADR 0016).
         try:
             if not self._schema_ready:
                 self.ensure_schema(timeout=READY_TIMEOUT)
@@ -115,6 +122,7 @@ class PostgresLinkStore:
 
     def create(self, code: str, url: str) -> Link:
         try:
+            self._ensure_schema_once()
             with self._pool.connection() as conn:
                 cur = conn.cursor(row_factory=class_row(Link))
                 return cur.execute(
@@ -130,6 +138,7 @@ class PostgresLinkStore:
 
     def get(self, code: str) -> Link | None:
         try:
+            self._ensure_schema_once()
             with self._pool.connection() as conn:
                 cur = conn.cursor(row_factory=class_row(Link))
                 return cur.execute(

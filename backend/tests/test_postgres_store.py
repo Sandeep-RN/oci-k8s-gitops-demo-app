@@ -53,6 +53,16 @@ def test_ensure_schema_is_idempotent_and_safe_concurrently(store):
     assert store.ready() is True
 
 
+def test_schema_is_created_on_first_use(store):
+    # A pod that started while Postgres was down never ran ensure_schema; its
+    # first request must create the table instead of failing (ADR 0016).
+    with store._pool.connection() as conn:
+        conn.execute("DROP TABLE links")
+    fresh = PostgresLinkStore(store._pool)
+    assert fresh.get("Abc1234") is None
+    assert fresh.create("Abc1234", "https://example.com/y").code == "Abc1234"
+
+
 def test_ready_is_false_and_errors_map_when_db_unreachable():
     pool = make_pool(conninfo="host=127.0.0.1 port=1 connect_timeout=1", timeout=2)
     pool.open(wait=False)

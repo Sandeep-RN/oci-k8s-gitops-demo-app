@@ -14,7 +14,7 @@ shortener** with a FastAPI backend, a static frontend and PostgreSQL storage.
 | `GET /{code}` | `302` to the stored URL with `Cache-Control: no-store`, or `404` |
 | `GET /api/links/{code}` | `200 {code, url, created_at}`, or `404` |
 | `GET /healthz` | Liveness: `200` whenever the process runs. Never checks the database |
-| `GET /readyz` | Readiness: `200` when Postgres answers, otherwise `503` |
+| `GET /readyz` | Readiness: `200` once this pod can serve (its connection pool is open). Deliberately does **not** check Postgres (ADR 0016) |
 
 - **Redirects are 302, not 301.** Browsers cache a 301 forever, which would
   hide repeat visits from the redirect SLO (ADR 0008) and make links impossible
@@ -25,11 +25,14 @@ shortener** with a FastAPI backend, a static frontend and PostgreSQL storage.
   answer within about 2 s (`PG_POOL_TIMEOUT`, default 2 s) and `/readyz` within
   about 1.5 s. Every store call also runs under a hard time limit, because a
   pooled connection to a frozen server can block the driver with no timeout of
-  its own. Liveness stays up so Kubernetes does not restart healthy pods;
-  readiness takes them out of the Service until Postgres is back.
+  its own. Liveness and readiness both stay up: the database is shared by
+  every replica, so taking pods out of the Service would only turn these fast
+  503s into refused connections that no metric counts (ADR 0016, measured in
+  issue #53 of the demo repo).
 - **Configuration** comes from the standard libpq variables (`PGHOST`, `PGPORT`,
-  `PGUSER`, `PGPASSWORD`, `PGDATABASE`). The table is created at startup under
-  an advisory lock, so replicas can start together safely.
+  `PGUSER`, `PGPASSWORD`, `PGDATABASE`). The table is created at startup, or by
+  the first request if Postgres was down then, under an advisory lock, so
+  replicas can start together safely.
 - **Metrics** for the redirect SLO are served on a separate port
   (`METRICS_PORT`, default 9000) at `/metrics`, never on the app port, which
   is behind the public load balancer. One histogram,

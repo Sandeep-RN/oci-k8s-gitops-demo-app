@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from app.links import InMemoryLinkStore
 from app.main import create_app
 
 
@@ -28,6 +29,18 @@ def test_readyz_503_when_a_check_fails():
     r = client.get("/readyz")
     assert r.status_code == 503
     assert r.json() == {"status": "not ready"}
+
+
+def test_readyz_ignores_the_link_store():
+    # Store reachability is shared by every replica, so it is not a readiness
+    # signal (ADR 0016). Only checks passed in explicitly count.
+    class DownStore(InMemoryLinkStore):
+        def ready(self) -> bool:
+            raise RuntimeError("db down")
+
+    r = TestClient(create_app(store=DownStore())).get("/readyz")
+    assert r.status_code == 200
+    assert r.json() == {"status": "ready"}
 
 
 def test_readyz_503_when_a_check_raises():
