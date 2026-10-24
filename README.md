@@ -95,3 +95,5 @@ fails if any test is skipped.
   (gitleaks with custom OCI rules).
 - **This repo is public.** No secrets in code, images or workflow files; use
   GitHub secrets.
+
+<!-- ci path-filter test -->
