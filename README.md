@@ -30,6 +30,13 @@ shortener** with a FastAPI backend, a static frontend and PostgreSQL storage.
 - **Configuration** comes from the standard libpq variables (`PGHOST`, `PGPORT`,
   `PGUSER`, `PGPASSWORD`, `PGDATABASE`). The table is created at startup under
   an advisory lock, so replicas can start together safely.
+- **Metrics** for the redirect SLO are served on a separate port
+  (`METRICS_PORT`, default 9000) at `/metrics`, never on the app port, which
+  is behind the public load balancer. One histogram,
+  `http_request_duration_seconds{method, route, status}`, labelled by route
+  *template* (`/{code}`, not each code) so the number of series stays fixed;
+  unmatched paths share one `<unmatched>` label. Its buckets include 0.2 s, the
+  latency SLO threshold.
 
 Part of a three-repo project. Architecture, ADRs and the issue tracker live in
 [oci-k8s-gitops-demo](https://github.com/Sandeep-RN/oci-k8s-gitops-demo);
@@ -40,7 +47,7 @@ No manifests belong in this repo.
 ## Layout
 
 ```
-backend/                FastAPI service (/healthz, /readyz, link endpoints)
+backend/                FastAPI service (/healthz, /readyz, link endpoints, metrics)
 frontend/               Static frontend
 .github/workflows/      CI
 ```

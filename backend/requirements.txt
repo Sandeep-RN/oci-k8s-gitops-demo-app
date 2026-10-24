@@ -5,3 +5,5 @@ uvicorn[standard]==0.54.0
 # Binary wheels include libpq for amd64 and arm64 (no compiler in the image).
 psycopg[binary]==3.3.6
 psycopg-pool==3.3.3
+# Request metrics for the SLO (ADR 0008). One uvicorn worker, so no multiprocess mode.
+prometheus-client==0.26.0
