@@ -52,6 +52,10 @@ without pushing (ADR 0015). On `main` it also:
    merges once the gitops `validate` check passes; ArgoCD then deploys it.
    Older open bump PRs are closed as superseded.
 
+The image and tag bump run only when `backend/**` or `.github/workflows/ci.yml`
+changed, so a docs-only merge does not rebuild the image or restart pods.
+Lint and tests always run. If CI cannot work out the diff, it builds.
+
 CI never talks to a cluster. The cross-repo step uses `GITOPS_TOKEN`, a
 fine-grained token limited to the gitops repo (contents and pull requests:
 write). Rotate it before it expires.
