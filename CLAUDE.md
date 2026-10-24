@@ -21,3 +21,7 @@ Default vocabulary: needs-triage, needs-info, ready-for-agent, ready-for-human, 
 ### Domain docs
 
 Single-context, kept in the demo repo: one GLOSSARY.md and docs/adr/ at its root (this repo has none). See `docs/agents/domain.md` in the demo repo.
+
+### Post ideas
+
+Offer to log non-obvious fixes, gotchas and trade-offs as `post-idea` issues in the demo repo (Sandeep-RN/oci-k8s-gitops-demo). Rules and format: "Post ideas" in that repo's CLAUDE.md. Fake values only; real events only.
