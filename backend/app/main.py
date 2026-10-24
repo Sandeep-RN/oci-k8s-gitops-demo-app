@@ -79,8 +79,12 @@ def create_app(
 
     @app.get("/readyz")
     def readyz(response: Response) -> dict[str, str]:
-        # Readiness: take the pod out of the Service while a dependency is down.
-        for check in [*readiness_checks, store.ready]:
+        # Readiness: should THIS pod get traffic? Only pod-local checks count.
+        # The database is shared by every replica, so failing readiness on it
+        # would take all of them out of the Service at once: clients would get
+        # refused connections instead of fast 503s, and the SLI would not see
+        # them (ADR 0016, measured in issue #53).
+        for check in readiness_checks:
             try:
                 ok = check()
             except Exception:
@@ -143,19 +147,27 @@ def create_production_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        # wait=False: the process starts (and passes liveness) even if Postgres
-        # is down; readiness reports it and creates the schema once reachable.
         # Started here, not at import, so importing the module binds no port.
         _, stop_metrics = start_metrics_server(metrics_port, registry=REGISTRY)
+        # wait=False: the process starts and becomes ready even if Postgres is
+        # down; requests answer 503 until it is back. This first check only
+        # gives the schema a head start; the first request creates it otherwise.
         pool.open(wait=False)
         if not store.ready():
-            log.warning("postgres not reachable at startup; will retry via /readyz")
+            log.warning("postgres not reachable at startup; requests will return 503 until it is")
         yield
         pool.close()
         stop_metrics()
 
+    # Pod-local readiness: the pool is open. It closes during shutdown, which
+    # takes the pod out of the Service before it stops serving.
     # The global registry also carries process metrics (memory, CPU, open fds).
-    return create_app(store=store, lifespan=lifespan, registry=REGISTRY)
+    return create_app(
+        readiness_checks=[lambda: not pool.closed],
+        store=store,
+        lifespan=lifespan,
+        registry=REGISTRY,
+    )
 
 
 app = create_production_app()
