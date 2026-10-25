@@ -13,6 +13,11 @@ COPY app ./app
 RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin appuser
 USER 10001
 
-# 8000: the app. 9000: Prometheus metrics, kept off the public Service.
+# uvicorn reads any of its options from UVICORN_* variables (UVICORN_PORT,
+# UVICORN_LOG_LEVEL, ...), so `docker run -e UVICORN_PORT=8080` changes the
+# port. A command-line flag would override the variable, so none is passed.
+ENV UVICORN_HOST=0.0.0.0 UVICORN_PORT=8000
+
+# 8000: the app (default). 9000: Prometheus metrics, kept off the public Service.
 EXPOSE 8000 9000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app"]
