@@ -52,13 +52,15 @@ No manifests belong in this repo.
 ```
 backend/                FastAPI service (/healthz, /readyz, link endpoints, metrics)
 frontend/               Static frontend
-.github/workflows/      CI
+.github/workflows/      CI (ci.yml), secret scan (gitleaks.yml)
 ```
 
 ## CI (ADR 0009)
 
 On every PR: lint, test, a Trivy scan and a multi-arch (amd64 + arm64) build
-without pushing (ADR 0015). On `main` it also:
+without pushing (ADR 0015). `test` is a required check on `main`. A separate
+`gitleaks` workflow scans the full git history on every PR and push. On `main`
+it also:
 
 1. pushes the image to GHCR, tagged with the git SHA (tags are immutable), and
 2. opens a PR in the gitops repo that sets that tag, with auto-merge on. The PR
@@ -105,6 +107,7 @@ fails if any test is skipped.
 - Pin third-party GitHub Actions by commit SHA.
 - Changes go through a pull request (ADR 0011).
 - Install hooks once: `pip install pre-commit && pre-commit install`
-  (gitleaks with custom OCI rules).
+  (gitleaks with custom OCI rules). CI runs gitleaks too, since
+  `--no-verify` skips hooks.
 - **This repo is public.** No secrets in code, images or workflow files; use
   GitHub secrets.
