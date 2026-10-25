@@ -30,7 +30,9 @@ shortener** with a FastAPI backend, a static frontend and PostgreSQL storage.
   503s into refused connections that no metric counts (ADR 0016, measured in
   issue #53 of the demo repo).
 - **Configuration** comes from the standard libpq variables (`PGHOST`, `PGPORT`,
-  `PGUSER`, `PGPASSWORD`, `PGDATABASE`). The table is created at startup, or by
+  `PGUSER`, `PGPASSWORD`, `PGDATABASE`). In the container, the app port is
+  `UVICORN_PORT` (default 8000); any other uvicorn option can be set the same
+  way, for example `UVICORN_LOG_LEVEL`. The table is created at startup, or by
   the first request if Postgres was down then, under an advisory lock, so
   replicas can start together safely.
 - **Metrics** for the redirect SLO are served on a separate port
