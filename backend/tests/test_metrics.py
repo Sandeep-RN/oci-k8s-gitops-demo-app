@@ -9,6 +9,7 @@ from prometheus_client import CollectorRegistry
 from app.links import InMemoryLinkStore, StoreUnavailable
 from app.main import create_app
 from app.metrics import REQUEST_DURATION_BUCKETS, start_metrics_server
+from tests.helpers import AUTH, TOKENS
 
 METRIC = "http_request_duration_seconds"
 
@@ -25,8 +26,9 @@ def count(registry, route, status, method="GET"):
 
 
 def test_redirect_is_recorded_under_the_route_template(registry):
-    client = TestClient(create_app(registry=registry))
-    code = client.post("/api/links", json={"url": "https://example.com"}).json()["code"]
+    client = TestClient(create_app(registry=registry, tokens=TOKENS))
+    r = client.post("/api/links", json={"url": "https://example.com"}, headers=AUTH)
+    code = r.json()["code"]
 
     client.get(f"/{code}", follow_redirects=False)
 

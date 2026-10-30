@@ -73,3 +73,53 @@ def test_ready_is_false_and_errors_map_when_db_unreachable():
             s.get("Abc1234")
     finally:
         pool.close()
+
+
+# --- created_by (ADR 0020): which link-creation token made the link ---
+
+_OLD_SCHEMA = """
+CREATE TABLE links (
+    code       text        PRIMARY KEY,
+    url        text        NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+)
+"""
+
+
+def test_created_by_roundtrip(store):
+    assert store.create("Abc1234", "https://a.example", created_by="k6").created_by == "k6"
+    assert store.get("Abc1234").created_by == "k6"
+    assert store.create("Def5678", "https://b.example").created_by is None
+
+
+def test_created_by_on_a_fresh_table(store):
+    with store._pool.connection() as conn:
+        conn.execute("DROP TABLE links")
+    fresh = PostgresLinkStore(store._pool)
+    assert fresh.create("Abc1234", "https://a.example", created_by="owner").created_by == "owner"
+    assert fresh.get("Abc1234").created_by == "owner"
+
+
+@pytest.fixture
+def restore_schema(store):
+    # The old-schema test leaves a table without the CHECK constraints; drop it
+    # so the next test's store recreates the current schema.
+    yield
+    with store._pool.connection() as conn:
+        conn.execute("DROP TABLE IF EXISTS links")
+
+
+def test_created_by_is_added_to_an_existing_table(store, restore_schema):
+    # A database from before the token gate: links exist, the column does not.
+    with store._pool.connection() as conn:
+        conn.execute("DROP TABLE links")
+        conn.execute(_OLD_SCHEMA)
+        conn.execute("INSERT INTO links (code, url) VALUES ('Old1234', 'https://old.example')")
+    upgraded = PostgresLinkStore(store._pool)
+    old = upgraded.get("Old1234")
+    assert old.url == "https://old.example"
+    assert old.created_by is None
+    assert upgraded.create("New1234", "https://new.example", created_by="k6").created_by == "k6"
+    # Running the schema step again on the upgraded table changes nothing.
+    PostgresLinkStore(store._pool).ensure_schema()
+    assert upgraded.get("New1234").created_by == "k6"
