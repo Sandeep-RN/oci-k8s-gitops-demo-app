@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.links import StoreUnavailable
 from app.main import create_app
 from app.postgres import POOL_TIMEOUT_DEFAULT, READY_TIMEOUT, PostgresLinkStore, make_pool
+from tests.helpers import AUTH, TOKENS
 
 
 @pytest.fixture
@@ -47,10 +48,10 @@ def test_readyz_stays_ready_while_the_database_hangs(hung_store):
 
 
 def test_api_calls_return_503_within_the_pool_timeout(hung_store):
-    client = TestClient(create_app(store=hung_store), follow_redirects=False)
+    client = TestClient(create_app(store=hung_store, tokens=TOKENS), follow_redirects=False)
     for call in (
         lambda: client.get("/AAAAAAA"),
-        lambda: client.post("/api/links", json={"url": "https://example.com"}),
+        lambda: client.post("/api/links", json={"url": "https://example.com"}, headers=AUTH),
     ):
         start = time.monotonic()
         assert call().status_code == 503
@@ -99,9 +100,9 @@ class StuckStore(InMemoryLinkStore):
         time.sleep(self.delay)
         return super().get(code)
 
-    def create(self, code, url):
+    def create(self, code, url, created_by=None):
         time.sleep(self.delay)
-        return super().create(code, url)
+        return super().create(code, url, created_by)
 
     def ready(self):
         time.sleep(self.delay)

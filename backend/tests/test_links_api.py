@@ -6,17 +6,18 @@ from fastapi.testclient import TestClient
 from app import links
 from app.links import CodeCollision, InMemoryLinkStore, StoreUnavailable
 from app.main import create_app
+from tests.helpers import AUTH, TOKENS
 
 CODE_RE = re.compile(r"^[0-9A-Za-z]{7}$")
 
 
 @pytest.fixture
 def client():
-    return TestClient(create_app(store=InMemoryLinkStore()), follow_redirects=False)
+    return TestClient(create_app(store=InMemoryLinkStore(), tokens=TOKENS), follow_redirects=False)
 
 
 def create(client, url):
-    return client.post("/api/links", json={"url": url})
+    return client.post("/api/links", json={"url": url}, headers=AUTH)
 
 
 def test_create_returns_201_with_code_and_url(client):
@@ -97,7 +98,7 @@ def test_collision_is_retried(monkeypatch):
     store = InMemoryLinkStore()
     seq = iter(["AAAAAAA", "AAAAAAA", "BBBBBBB"])
     monkeypatch.setattr(links, "generate_code", lambda: next(seq))
-    c = TestClient(create_app(store=store))
+    c = TestClient(create_app(store=store, tokens=TOKENS))
     assert create(c, "https://a.example").json()["code"] == "AAAAAAA"
     # Second create hits the taken code once, then succeeds with the next one.
     assert create(c, "https://b.example").json()["code"] == "BBBBBBB"
@@ -107,12 +108,12 @@ def test_gives_up_after_repeated_collisions(monkeypatch):
     store = InMemoryLinkStore()
     store.create("AAAAAAA", "https://a.example")
     monkeypatch.setattr(links, "generate_code", lambda: "AAAAAAA")
-    c = TestClient(create_app(store=store), raise_server_exceptions=False)
+    c = TestClient(create_app(store=store, tokens=TOKENS), raise_server_exceptions=False)
     assert create(c, "https://b.example").status_code == 500
 
 
 class DownStore(InMemoryLinkStore):
-    def create(self, code, url):
+    def create(self, code, url, created_by=None):
         raise StoreUnavailable("db down")
 
     def get(self, code):
@@ -120,7 +121,7 @@ class DownStore(InMemoryLinkStore):
 
 
 def test_store_outage_returns_503_not_500():
-    c = TestClient(create_app(store=DownStore()), follow_redirects=False)
+    c = TestClient(create_app(store=DownStore(), tokens=TOKENS), follow_redirects=False)
     assert create(c, "https://a.example").status_code == 503
     assert c.get("/AAAAAAA").status_code == 503
     assert c.get("/api/links/AAAAAAA").status_code == 503

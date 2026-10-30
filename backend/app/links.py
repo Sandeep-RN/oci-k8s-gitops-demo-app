@@ -26,6 +26,9 @@ class Link:
     code: str
     url: str
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    # Name of the link-creation token that made it (ADR 0020). None for links
+    # created before the token gate existed.
+    created_by: str | None = None
 
 
 class CodeCollision(Exception):
@@ -37,7 +40,7 @@ class StoreUnavailable(Exception):
 
 
 class LinkStore(Protocol):
-    def create(self, code: str, url: str) -> Link: ...
+    def create(self, code: str, url: str, created_by: str | None = None) -> Link: ...
 
     def get(self, code: str) -> Link | None: ...
 
@@ -69,11 +72,11 @@ class InMemoryLinkStore:
         self._links: dict[str, Link] = {}
         self._lock = threading.Lock()
 
-    def create(self, code: str, url: str) -> Link:
+    def create(self, code: str, url: str, created_by: str | None = None) -> Link:
         with self._lock:
             if code in self._links:
                 raise CodeCollision(code)
-            link = Link(code=code, url=url)
+            link = Link(code=code, url=url, created_by=created_by)
             self._links[code] = link
             return link
 
@@ -121,8 +124,8 @@ class TimeBoundedStore:
             future.cancel()  # only helps if it never started
             raise StoreUnavailable(f"store call exceeded {timeout:g}s") from None
 
-    def create(self, code: str, url: str) -> Link:
-        return self._run(self._inner.create, code, url, timeout=self._timeout)
+    def create(self, code: str, url: str, created_by: str | None = None) -> Link:
+        return self._run(self._inner.create, code, url, created_by, timeout=self._timeout)
 
     def get(self, code: str) -> Link | None:
         return self._run(self._inner.get, code, timeout=self._timeout)

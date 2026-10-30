@@ -10,15 +10,38 @@ shortener** with a FastAPI backend, a static frontend and PostgreSQL storage.
 
 | Method and path | Result |
 |---|---|
-| `POST /api/links` `{"url": "https://..."}` | `201 {code, url, created_at}`; `422` unless the URL is http(s) and at most 2048 characters |
-| `GET /{code}` | `302` to the stored URL with `Cache-Control: no-store`, or `404` |
-| `GET /api/links/{code}` | `200 {code, url, created_at}`, or `404` |
+| `POST /api/links` `{"url": "https://..."}` with `Authorization: Bearer <token>` | `201 {code, url, created_at}`; `401` with `WWW-Authenticate: Bearer` if the token is missing or unknown; `422` unless the URL is http(s) and at most 2048 characters |
+| `GET /{code}` | `302` to the stored URL with `Cache-Control: no-store`, or `404`. No token needed |
+| `GET /api/links/{code}` | `200 {code, url, created_at}`, or `404`. No token needed |
 | `GET /healthz` | Liveness: `200` whenever the process runs. Never checks the database |
 | `GET /readyz` | Readiness: `200` once this pod can serve (its connection pool is open). Deliberately does **not** check Postgres (ADR 0016) |
 
 - **Redirects are 302, not 301.** Browsers cache a 301 forever, which would
   hide repeat visits from the redirect SLO (ADR 0008) and make links impossible
   to change.
+- **Creating a link needs a token** (ADR 0020). On a public domain, a link
+  shortener anyone can use is an open redirector: spam and phishing links would
+  get the domain blocklisted. Redirects, lookups, health checks and metrics
+  stay public.
+  - Tokens are named. They are files in `LINK_TOKENS_DIR` (default
+    `/etc/link-shortener/tokens`), one per token: the file name is the token's
+    name (`owner`, `k6`), the content its value. That is the layout a mounted
+    Kubernetes Secret produces, so adding or revoking one token is one key in
+    one SealedSecret. Mount the whole Secret as a volume, not with `subPath`
+    (a `subPath` mount never sees Secret updates). Values under 32 characters
+    are ignored; generate them
+    with `openssl rand -hex 32`. Never put a token in the image, an
+    environment variable or the repo.
+  - The directory is read on each create, so a revoked token stops working
+    once the kubelet refreshes the mounted Secret (about a minute), with no
+    restart. With no tokens, the app still starts and serves redirects; every
+    create answers `401`.
+  - The comparison is constant-time. Each link stores the creating token's
+    **name** (`created_by`, not shown by the public lookup), and the log
+    records it. Token values are never logged or returned.
+  - `LINK_CREATE_MODE` is `token` (the default). `open` is reserved: the app
+    refuses to start with it until a stricter rate limit, a destination
+    allow/blocklist, link expiry and a way to disable reported links exist.
 - **Codes** are 7 random base62 characters, with a unique key and retry on
   collision.
 - **A database outage** returns `503`, never `500`, and fails fast: requests
@@ -34,7 +57,8 @@ shortener** with a FastAPI backend, a static frontend and PostgreSQL storage.
   `UVICORN_PORT` (default 8000); any other uvicorn option can be set the same
   way, for example `UVICORN_LOG_LEVEL`. The table is created at startup, or by
   the first request if Postgres was down then, under an advisory lock, so
-  replicas can start together safely.
+  replicas can start together safely. The same step adds the `created_by`
+  column to a table created before the token gate.
 - **Metrics** for the redirect SLO are served on a separate port
   (`METRICS_PORT`, default 9000) at `/metrics`, never on the app port, which
   is behind the public load balancer. One histogram,
@@ -52,7 +76,7 @@ No manifests belong in this repo.
 ## Layout
 
 ```
-backend/                FastAPI service (/healthz, /readyz, link endpoints, metrics)
+backend/                FastAPI service (/healthz, /readyz, link endpoints, token gate, metrics)
 frontend/               Static frontend
 .github/workflows/      CI (ci.yml), secret scan (gitleaks.yml)
 ```
@@ -96,8 +120,11 @@ pytest -rs
 
 docker build -t link-shortener:dev .
 docker network create ls-net && docker network connect ls-net ls-pg
-docker run --rm --network ls-net -p 8000:8000 -e PGHOST=ls-pg -e PGUSER=postgres -e PGDATABASE=postgres link-shortener:dev
-curl -s -X POST localhost:8000/api/links -H 'content-type: application/json' -d '{"url":"https://example.com"}'
+mkdir -p /tmp/ls-tokens && openssl rand -hex 32 > /tmp/ls-tokens/dev   # a local token named "dev"
+docker run --rm --network ls-net -p 8000:8000 -v /tmp/ls-tokens:/etc/link-shortener/tokens:ro \
+  -e PGHOST=ls-pg -e PGUSER=postgres -e PGDATABASE=postgres link-shortener:dev
+curl -s -X POST localhost:8000/api/links -H "authorization: Bearer $(cat /tmp/ls-tokens/dev)" \
+  -H 'content-type: application/json' -d '{"url":"https://example.com"}'
 ```
 
 CI runs the same integration tests against a Postgres service container and

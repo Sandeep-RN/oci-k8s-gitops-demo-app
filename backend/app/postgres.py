@@ -25,9 +25,23 @@ _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS links (
     code       text        PRIMARY KEY CHECK (code ~ '^[0-9A-Za-z]{{{CODE_LENGTH}}}$'),
     url        text        NOT NULL CHECK (length(url) <= 2048),
-    created_at timestamptz NOT NULL DEFAULT now()
+    created_at timestamptz NOT NULL DEFAULT now(),
+    created_by text
 )
 """
+
+# Tables created before the token gate (ADR 0020) lack created_by. It is added
+# only when missing: ADD COLUMN takes an ACCESS EXCLUSIVE lock even with
+# IF NOT EXISTS, and this runs on every pod start. Nullable with no default, so
+# adding it is a catalog change, not a table rewrite. At scale, schema changes
+# belong in a migration tool run once per release, not in the app.
+_HAS_CREATED_BY = """
+SELECT 1 FROM information_schema.columns
+WHERE table_schema = current_schema() AND table_name = 'links' AND column_name = 'created_by'
+"""
+_ADD_CREATED_BY = "ALTER TABLE links ADD COLUMN created_by text"
+
+_COLUMNS = "code, url, created_at, created_by"
 
 # How long a request waits for a free connection before failing with a 503.
 # Short on purpose: during an outage users and probes should get a quick error,
@@ -94,6 +108,9 @@ class PostgresLinkStore:
             with self._pool.connection(timeout=timeout) as conn, conn.transaction():
                 conn.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK_KEY,))
                 conn.execute(_SCHEMA)
+                if conn.execute(_HAS_CREATED_BY).fetchone() is None:
+                    log.info("adding links.created_by")
+                    conn.execute(_ADD_CREATED_BY)
         except _UNAVAILABLE as e:
             raise StoreUnavailable(str(e)) from e
         self._schema_ready = True
@@ -120,15 +137,15 @@ class PostgresLinkStore:
             log.warning("postgres not ready: %s", e)
             return False
 
-    def create(self, code: str, url: str) -> Link:
+    def create(self, code: str, url: str, created_by: str | None = None) -> Link:
         try:
             self._ensure_schema_once()
             with self._pool.connection() as conn:
                 cur = conn.cursor(row_factory=class_row(Link))
                 return cur.execute(
-                    "INSERT INTO links (code, url) VALUES (%s, %s)"
-                    " RETURNING code, url, created_at",
-                    (code, url),
+                    "INSERT INTO links (code, url, created_by) VALUES (%s, %s, %s)"
+                    f" RETURNING {_COLUMNS}",
+                    (code, url, created_by),
                 ).fetchone()
         except UniqueViolation as e:
             # The pool's connection context rolls back the failed transaction.
@@ -142,7 +159,7 @@ class PostgresLinkStore:
             with self._pool.connection() as conn:
                 cur = conn.cursor(row_factory=class_row(Link))
                 return cur.execute(
-                    "SELECT code, url, created_at FROM links WHERE code = %s", (code,)
+                    f"SELECT {_COLUMNS} FROM links WHERE code = %s", (code,)
                 ).fetchone()
         except _UNAVAILABLE as e:
             raise StoreUnavailable(str(e)) from e
