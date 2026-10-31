@@ -3,8 +3,9 @@
 Application code and CI for the OCI Kubernetes GitOps demo: a small **link
 shortener** with a FastAPI backend, a static frontend and PostgreSQL storage.
 
-> **Status:** backend API on PostgreSQL with full CI and the GitOps tag bump.
-> The frontend is not written yet.
+> **Status (2026-11-01):** backend API on PostgreSQL with full CI and the
+> GitOps tag bump, live at https://demo.sandeeprn.in (HTTPS; creating a link
+> needs a token, see below). The frontend is not written yet.
 
 ## API
 
@@ -61,7 +62,7 @@ shortener** with a FastAPI backend, a static frontend and PostgreSQL storage.
   column to a table created before the token gate.
 - **Metrics** for the redirect SLO are served on a separate port
   (`METRICS_PORT`, default 9000) at `/metrics`, never on the app port, which
-  is behind the public load balancer. One histogram,
+  is behind the public edge (NLB and Traefik). One histogram,
   `http_request_duration_seconds{method, route, status}`, labelled by route
   *template* (`/{code}`, not each code) so the number of series stays fixed;
   unmatched paths share one `<unmatched>` label. Its buckets include 0.2 s, the
