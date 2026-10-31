@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>demo.sandeeprn.in: a link shortener on Kubernetes</title>
+<style>
+  body { font: 16px/1.55 system-ui, sans-serif; max-width: 42rem; margin: 2.5rem auto;
+         padding: 0 1rem; color: #1f2328; background: #fff; }
+  h1 { font-size: 1.6rem; margin-bottom: .25rem; }
+  h2 { font-size: 1.1rem; margin-top: 2rem; }
+  p.lead { color: #59636e; margin-top: 0; }
+  a { color: #0969da; }
+  code { font: .9em ui-monospace, monospace; background: #f6f8fa; padding: .1em .3em;
+         border-radius: 4px; }
+  li { margin: .35rem 0; }
+  @media (prefers-color-scheme: dark) {
+    body { color: #e6edf3; background: #0d1117; }
+    p.lead { color: #9198a1; }
+    a { color: #4493f8; }
+    code { background: #161b22; }
+  }
+</style>
+</head>
+<body>
+<h1>A link shortener on Kubernetes</h1>
+<p class="lead">A public demo of a small service run the way production services are run.</p>
+
+<p>This site is a link shortener: <code>/{code}</code> redirects to a stored URL.
+It runs on Kubernetes on Oracle Cloud, deployed by GitOps: every change is a pull
+request, CI builds and scans the image, and Argo CD rolls it out. Prometheus tracks
+a 7-day service level objective for the redirects and alerts when it burns too fast.</p>
+
+<h2>Try it</h2>
+<ul>
+<!--example-->  <li><a href="/docs">API documentation</a>: every endpoint. Redirects and lookups
+    are public; creating a link needs a token, so this page has no form.</li>
+</ul>
+
+<h2>Source</h2>
+<ul>
+  <li><a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo">oci-k8s-gitops-demo</a>:
+    Terraform for OCI, architecture decisions, runbooks</li>
+  <li><a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo-app">oci-k8s-gitops-demo-app</a>:
+    this FastAPI service and its CI</li>
+  <li><a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo-gitops">oci-k8s-gitops-demo-gitops</a>:
+    Kubernetes manifests that Argo CD deploys</li>
+</ul>
+</body>
+</html>

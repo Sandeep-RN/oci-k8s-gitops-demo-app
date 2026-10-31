@@ -13,6 +13,7 @@ shortener** with a FastAPI backend, a static frontend and PostgreSQL storage.
 | Method and path | Result |
 |---|---|
 | `POST /api/links` `{"url": "https://..."}` with `Authorization: Bearer <token>` | `201 {code, url, created_at}`; `401` with `WWW-Authenticate: Bearer` if the token is missing or unknown; `422` unless the URL is http(s) and at most 2048 characters |
+| `GET /` | The landing page: static HTML, no JavaScript, nothing loaded from elsewhere (a strict `Content-Security-Policy` enforces that), `Cache-Control: public, max-age=300`. Not part of the redirect SLO: its metric route is `/` |
 | `GET /{code}` | `302` to the stored URL with `Cache-Control: no-store`, or `404`. No token needed |
 | `GET /api/links/{code}` | `200 {code, url, created_at}`, or `404`. No token needed |
 | `GET /healthz` | Liveness: `200` whenever the process runs. Never checks the database |
@@ -44,6 +45,10 @@ shortener** with a FastAPI backend, a static frontend and PostgreSQL storage.
   - `LINK_CREATE_MODE` is `token` (the default). `open` is reserved: the app
     refuses to start with it until a stricter rate limit, a destination
     allow/blocklist, link expiry and a way to disable reported links exist.
+- **The landing page's example link** is configuration, not code:
+  `EXAMPLE_LINK_CODE` names an existing short link in that cluster's
+  database, so each cluster sets its own. Unset, the page has no example
+  line; an invalid code is logged and left out, never fatal.
 - **Codes** are 7 random base62 characters, with a unique key and retry on
   collision.
 - **A database outage** returns `503`, never `500`, and fails fast: requests
@@ -78,7 +83,7 @@ No manifests belong in this repo.
 ## Layout
 
 ```
-backend/                FastAPI service (/healthz, /readyz, link endpoints, token gate, metrics)
+backend/                FastAPI service (landing page, /healthz, /readyz, link endpoints, token gate, metrics)
 frontend/               Static frontend
 .github/workflows/      CI (ci.yml), secret scan (gitleaks.yml)
 ```

@@ -1,12 +1,13 @@
 import logging
 import os
+import pathlib
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Path, Request, Response, status
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from prometheus_client import REGISTRY, CollectorRegistry
 from pydantic import AfterValidator, AnyHttpUrl, BaseModel
@@ -32,6 +33,41 @@ MAX_URL_LENGTH = 2048
 METRICS_PORT_DEFAULT = 9000
 # Where the link-creation tokens are mounted (one file per token, ADR 0020).
 LINK_TOKENS_DIR_DEFAULT = "/etc/link-shortener/tokens"
+
+# The landing page (demo issue #103). Static, so caches may keep it briefly.
+LANDING_PAGE = pathlib.Path(__file__).parent / "static" / "index.html"
+# The page has no scripts and loads nothing from elsewhere; the CSP makes that
+# a rule the browser enforces. Inline CSS is the only thing it allows.
+LANDING_HEADERS = {
+    "Cache-Control": "public, max-age=300",
+    "Content-Security-Policy": (
+        "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; "
+        "form-action 'none'; frame-ancestors 'none'"
+    ),
+}
+# Replaced by the example link's list item, or by nothing.
+EXAMPLE_MARKER = "<!--example-->"
+
+
+def render_landing_page(example_code: str | None) -> str:
+    """The landing page, with an example short link if a valid code is given.
+
+    The code is configuration (EXAMPLE_LINK_CODE), not part of the page: a link
+    is a row in one cluster's database, so each cluster has its own. Only a
+    valid code is shown; base62 only, so it cannot inject HTML. An invalid one
+    is logged and left out, never fatal: a cosmetic setting must not stop the
+    app that serves the redirects.
+    """
+    item = ""
+    if example_code and links.is_valid_code(example_code):
+        item = (
+            f'  <li><a href="/{example_code}">/{example_code}</a>: an example short '
+            "link; it redirects to the project's main repo.</li>\n"
+        )
+    elif example_code:
+        log.warning("EXAMPLE_LINK_CODE %r is not a valid code; no example link shown", example_code)
+    return LANDING_PAGE.read_text(encoding="utf-8").replace(EXAMPLE_MARKER, item)
+
 
 # Who may create links (ADR 0020). Only `token` is implemented. `open` is
 # reserved for a future ADR and refuses to start until its safeguards exist.
@@ -88,12 +124,15 @@ def create_app(
     registry: CollectorRegistry | None = None,
     tokens: TokenSource | None = None,
     create_mode: str = CREATE_MODE_TOKEN,
+    example_code: str | None = None,
 ) -> FastAPI:
     _check_create_mode(create_mode)
     store = store if store is not None else InMemoryLinkStore()
     # No token source means no tokens: creation fails closed.
     token_source: TokenSource = tokens if tokens is not None else NoTokens()
     app = FastAPI(title="link-shortener", lifespan=lifespan)
+    # Read once: a missing file fails at startup, not on the first visit.
+    landing_html = render_landing_page(example_code)
     # A private registry by default: metrics can only be registered once per
     # registry, and tests build many apps. Production passes the global one.
     histogram = make_request_histogram(registry if registry is not None else CollectorRegistry())
@@ -173,6 +212,10 @@ def create_app(
         if link is None:
             raise HTTPException(status_code=404, detail="not found")
         return LinkOut(code=link.code, url=link.url, created_at=link.created_at)
+
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    def landing_page() -> HTMLResponse:
+        return HTMLResponse(landing_html, headers=LANDING_HEADERS)
 
     @app.get("/{code}")
     def redirect(code: str) -> RedirectResponse:
@@ -257,6 +300,7 @@ def create_production_app() -> FastAPI:
         registry=REGISTRY,
         tokens=tokens,
         create_mode=create_mode,
+        example_code=os.environ.get("EXAMPLE_LINK_CODE"),
     )
 
 
