@@ -1,9 +1,19 @@
 # The landing page at / (demo issue #103): static HTML served by the backend.
+# Its metric label (it must stay out of the redirect SLO) is in test_metrics.py.
+import re
+
 import pytest
 from fastapi.testclient import TestClient
-from prometheus_client import CollectorRegistry
 
 from app.main import create_app
+
+REPOS = (
+    "https://github.com/Sandeep-RN/oci-k8s-gitops-demo",
+    "https://github.com/Sandeep-RN/oci-k8s-gitops-demo-app",
+    "https://github.com/Sandeep-RN/oci-k8s-gitops-demo-gitops",
+)
+# A link to a short code: "/" plus 7 base62 characters.
+CODE_LINK = re.compile(r'href="/[0-9A-Za-z]{7}"')
 
 
 @pytest.fixture
@@ -16,24 +26,6 @@ def test_root_is_a_cacheable_html_page(client):
     assert r.status_code == 200
     assert r.headers["content-type"] == "text/html; charset=utf-8"
     assert r.headers["cache-control"] == "public, max-age=300"
-
-
-def test_root_does_not_count_toward_the_redirect_slo():
-    # The SLO recording rules (gitops repo, slo-rules.yaml) select route="/{code}"
-    # only. Page views must land under their own label, not in the redirect SLI.
-    registry = CollectorRegistry()
-    TestClient(create_app(registry=registry)).get("/")
-    labels = {"method": "GET", "route": "/", "status": "200"}
-    assert registry.get_sample_value("http_request_duration_seconds_count", labels) == 1
-    routes = {s.labels.get("route") for m in registry.collect() for s in m.samples}
-    assert "/{code}" not in routes
-
-
-REPOS = (
-    "https://github.com/Sandeep-RN/oci-k8s-gitops-demo",
-    "https://github.com/Sandeep-RN/oci-k8s-gitops-demo-app",
-    "https://github.com/Sandeep-RN/oci-k8s-gitops-demo-gitops",
-)
 
 
 def test_root_links_to_the_api_docs_and_the_three_repos(client):
@@ -66,19 +58,19 @@ def test_root_sends_a_csp_that_allows_no_scripts_or_outside_assets(client):
 # configuration, not part of the image.
 def test_root_shows_the_configured_example_link():
     html = TestClient(create_app(example_code="Ab3dE9z")).get("/").text
-    assert 'href="/Ab3dE9z"' in html
+    assert CODE_LINK.findall(html) == ['href="/Ab3dE9z"']
 
 
 def test_root_has_no_example_link_when_none_is_configured(client):
-    assert "example" not in client.get("/").text.lower()
+    assert CODE_LINK.search(client.get("/").text) is None
 
 
-@pytest.mark.parametrize("bad", ["", "abc", "Ab3dE9z/", '"><b>x</b>', "Ab3dE9zz"])
+@pytest.mark.parametrize("bad", ["", "abc", "Ab3dE9z/", '"><b>x</b>', "Ab3dE9zz", "Ab3dE9z\n"])
 def test_an_invalid_example_code_is_left_out_not_fatal(bad, caplog):
     # A cosmetic setting must never stop the app that serves the redirects.
     r = TestClient(create_app(example_code=bad)).get("/")
     assert r.status_code == 200
-    assert "example" not in r.text.lower()
+    assert CODE_LINK.search(r.text) is None
     assert "<b>" not in r.text
     if bad:
         assert "EXAMPLE_LINK_CODE" in caplog.text

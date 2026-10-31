@@ -149,21 +149,14 @@ jobs:
         run: |
           docker run -d --name smoke -e UVICORN_PORT=8080 -p 127.0.0.1:8080:8080 "scan:${GITHUB_SHA}"
           trap 'docker rm -f smoke >/dev/null' EXIT
+          fail() { echo "::error::$1"; docker logs smoke; exit 1; }
           up=false
           for _ in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8080/healthz; then echo; up=true; break; fi
             sleep 1
           done
-          if [ "$up" != true ]; then
-            echo "::error::/healthz did not answer on port 8080 within 30 s"
-            docker logs smoke
-            exit 1
-          fi
-          if ! curl -fsS http://127.0.0.1:8080/ | grep -q '<h1>'; then
-            echo "::error::/ did not serve the landing page"
-            docker logs smoke
-            exit 1
-          fi
+          [ "$up" = true ] || fail "/healthz did not answer on port 8080 within 30 s"
+          curl -fsS http://127.0.0.1:8080/ | grep -q '<h1>' || fail "/ did not serve the landing page"
           echo "landing page served"
 
       - name: Log in to GHCR

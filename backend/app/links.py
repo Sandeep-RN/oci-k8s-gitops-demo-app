@@ -51,7 +51,8 @@ _CODE_RE = re.compile(CODE_PATTERN)
 
 
 def is_valid_code(code: str) -> bool:
-    return bool(_CODE_RE.match(code))
+    # fullmatch: with match, "$" also accepts one trailing newline.
+    return bool(_CODE_RE.fullmatch(code))
 
 
 def _random_code() -> str:
