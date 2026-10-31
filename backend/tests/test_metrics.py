@@ -39,6 +39,15 @@ def test_redirect_is_recorded_under_the_route_template(registry):
     assert f"/{code}" not in routes
 
 
+def test_landing_page_is_not_counted_as_a_redirect(registry):
+    # The SLO rules select route="/{code}" only; page views at / (demo #103)
+    # must land under their own label, not in the redirect SLI.
+    TestClient(create_app(registry=registry)).get("/")
+    assert count(registry, "/", "200") == 1
+    routes = {s.labels.get("route") for m in registry.collect() for s in m.samples}
+    assert "/{code}" not in routes
+
+
 def test_unknown_code_is_a_404_not_an_error(registry):
     client = TestClient(create_app(registry=registry))
     client.get("/zzzzzzz")

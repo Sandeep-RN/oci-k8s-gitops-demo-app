@@ -6,12 +6,12 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Path, Request, Response, status
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from prometheus_client import REGISTRY, CollectorRegistry
 from pydantic import AfterValidator, AnyHttpUrl, BaseModel
 
-from app import links
+from app import landing, links
 from app.auth import DirectoryTokens, NoTokens, TokenSource, match_token
 from app.links import (
     CODE_PATTERN,
@@ -32,6 +32,7 @@ MAX_URL_LENGTH = 2048
 METRICS_PORT_DEFAULT = 9000
 # Where the link-creation tokens are mounted (one file per token, ADR 0020).
 LINK_TOKENS_DIR_DEFAULT = "/etc/link-shortener/tokens"
+
 
 # Who may create links (ADR 0020). Only `token` is implemented. `open` is
 # reserved for a future ADR and refuses to start until its safeguards exist.
@@ -88,12 +89,15 @@ def create_app(
     registry: CollectorRegistry | None = None,
     tokens: TokenSource | None = None,
     create_mode: str = CREATE_MODE_TOKEN,
+    example_code: str | None = None,
 ) -> FastAPI:
     _check_create_mode(create_mode)
     store = store if store is not None else InMemoryLinkStore()
     # No token source means no tokens: creation fails closed.
     token_source: TokenSource = tokens if tokens is not None else NoTokens()
     app = FastAPI(title="link-shortener", lifespan=lifespan)
+    # Read once: a missing file fails at startup, not on the first visit.
+    landing_html = landing.render(example_code)
     # A private registry by default: metrics can only be registered once per
     # registry, and tests build many apps. Production passes the global one.
     histogram = make_request_histogram(registry if registry is not None else CollectorRegistry())
@@ -173,6 +177,10 @@ def create_app(
         if link is None:
             raise HTTPException(status_code=404, detail="not found")
         return LinkOut(code=link.code, url=link.url, created_at=link.created_at)
+
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    def landing_page() -> HTMLResponse:
+        return HTMLResponse(landing_html, headers=landing.HEADERS)
 
     @app.get("/{code}")
     def redirect(code: str) -> RedirectResponse:
@@ -257,6 +265,8 @@ def create_production_app() -> FastAPI:
         registry=REGISTRY,
         tokens=tokens,
         create_mode=create_mode,
+        # Stripped: a ConfigMap value written as a YAML block keeps a trailing newline.
+        example_code=os.environ.get("EXAMPLE_LINK_CODE", "").strip(),
     )
 
 
