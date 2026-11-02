@@ -3,10 +3,10 @@
 Application code and CI for the OCI Kubernetes GitOps demo: a small **link
 shortener** with a FastAPI backend, a static frontend and PostgreSQL storage.
 
-> **Status (2026-11-01):** backend API on PostgreSQL with full CI and the
-> GitOps tag bump, live at [demo.sandeeprn.in](https://demo.sandeeprn.in/docs)
-> (the API page; HTTPS; creating a link needs a token, see below). `/` has no
-> page yet: a landing page is demo issue #103.
+> **Status (2026-11-02):** backend API on PostgreSQL with full CI and the
+> GitOps tag bump, live at [demo.sandeeprn.in](https://demo.sandeeprn.in/)
+> (HTTPS; `/` is a landing page, `/docs` the API page; creating a link needs a
+> token, see below).
 
 ## API
 
