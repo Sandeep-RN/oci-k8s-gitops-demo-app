@@ -4,6 +4,12 @@ FROM python:3.12-slim AS base
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /srv
 
+# Pull in Debian security fixes the floating base tag has not caught up with yet
+# (Trivy gate, demo #112: zlib1g HIGH CVEs with a fix available). Scoped to the
+# one package so builds stay predictable; delete this layer once the upstream
+# python image ships the fix. Runs as root, before USER, and leaves no apt lists.
+RUN apt-get update     && apt-get install -y --no-install-recommends --only-upgrade zlib1g     && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
