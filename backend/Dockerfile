@@ -1,6 +1,6 @@
 # Multi-arch image (amd64 + arm64, ADR 0015): a slim base keeps both small and
 # there are no compiled wheels to cross-build.
-FROM python:3.12-slim AS base
+FROM python:3.15-slim AS base
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /srv
 
