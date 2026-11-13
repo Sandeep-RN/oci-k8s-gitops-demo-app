@@ -16,3 +16,64 @@ regex = '''objectstorage\.[a-z0-9-]+\.oraclecloud\.com/n/[a-z0-9]+'''
 id = "oci-api-key-fingerprint"
 description = "OCI API signing key fingerprint"
 regex = '''fingerprint\s*=\s*"?((?:[0-9a-f]{2}:){15}[0-9a-f]{2})'''
+
+# Public IPv4 addresses (demo issue #167, ADR 0024). A node, load balancer
+# or home IP identifies the account and must not be published. Without this
+# rule, review was the only gate.
+# - Octets are limited to 0-255, so 256.1.1.1 or 1.2.3.456 never match.
+# - The address must not follow a letter, digit, "_" or ".", so "v1.36.5.1"
+#   does not match. The end is a zero-width \b, so two addresses one
+#   character apart ("a,b") are both checked. Go's regexp has no lookbehind,
+#   which is why the start consumes one character and the address itself is
+#   secretGroup 1.
+# Known false positives: a bare four-part version in prose, and the first
+# four parts of a five-part number. Not caught: IPv6, an address split
+# across lines, an address inside an image.
+[[rules]]
+id = "public-ipv4"
+description = "Public IPv4 address (a node, load balancer or home IP identifies the account)"
+regex = '''(?:^|[^0-9A-Za-z_.])((?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))\b'''
+secretGroup = 1
+tags = ["ip", "public-repo"]
+
+    # Ranges that are not reachable from the internet, or are reserved for
+    # examples, so they cannot identify anything. Anchored on the address.
+    [[rules.allowlists]]
+    description = "Non-public and documentation ranges"
+    regexes = [
+      '''^10\.''',                                    # RFC 1918 10/8
+      '''^172\.(?:1[6-9]|2[0-9]|3[01])\.''',          # RFC 1918 172.16/12
+      '''^192\.168\.''',                              # RFC 1918 192.168/16
+      '''^127\.''',                                   # loopback 127/8
+      '''^169\.254\.''',                              # link-local 169.254/16 (instance metadata address)
+      '''^100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.''', # shared address space 100.64/10 (CGNAT, RFC 6598)
+      '''^192\.0\.2\.''',                             # RFC 5737 TEST-NET-1
+      '''^198\.51\.100\.''',                          # RFC 5737 TEST-NET-2
+      '''^203\.0\.113\.''',                           # RFC 5737 TEST-NET-3
+    ]
+
+    # Exact values only: every netmask from /0 to /32 (this includes the
+    # unspecified address 0.0.0.0, the broadcast address and the start of
+    # /1-/8 test CIDRs), and the two public resolvers the repos really use
+    # (runbooks, verify-public-url.sh, cert-manager DNS-01 check). Any other
+    # resolver is flagged and has to be added here on purpose.
+    [[rules.allowlists]]
+    description = "Netmasks and well-known public DNS resolvers (exact values)"
+    regexes = [
+      '''^(?:(?:255|254|252|248|240|224|192|128|0)\.0\.0\.0|255\.(?:255|254|252|248|240|224|192|128|0)\.0\.0|255\.255\.(?:255|254|252|248|240|224|192|128|0)\.0|255\.255\.255\.(?:255|254|252|248|240|224|192|128|0))$''',
+      '''^1\.1\.1\.1$''',                             # Cloudflare resolver
+      '''^8\.8\.8\.8$''',                             # Google resolver
+    ]
+
+    # Four-part version numbers look exactly like addresses. Skip a line only
+    # when the WHOLE line is a version declaration: a version/tag/rev key, an
+    # image reference ending in a tag, or a Python requirement pin. An
+    # address anywhere else on such a line would break the anchors.
+    [[rules.allowlists]]
+    description = "Lines that only declare a four-part version"
+    regexTarget = "line"
+    regexes = [
+      '''(?i)^[\s+-]*["']?[\w.-]*(?:version|tag|rev|revision)["']?\s*[:=]\s*["']?v?\d+(?:\.\d+){3}["']?\s*,?\s*(?:#[^0-9]*)?$''',
+      '''(?i)^[\s+-]*["']?image["']?\s*[:=]\s*["']?[\w./-]+:v?\d+(?:\.\d+){3}["']?\s*(?:#[^0-9]*)?$''',
+      '''^[\s+-]*["']?[A-Za-z0-9][\w.-]*(?:\[[\w,.-]+\])?\s*(?:==|~=|>=|<=|!=)\s*\d+(?:\.\d+){3}["']?\s*,?\s*(?:#[^0-9]*)?$''',
+    ]
