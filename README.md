@@ -1,12 +1,19 @@
 # oci-k8s-gitops-demo-app
 
 Application code and CI for the OCI Kubernetes GitOps demo: a small **link
-shortener** with a FastAPI backend, a static frontend and PostgreSQL storage.
+shortener** with a FastAPI backend and PostgreSQL storage. The backend also
+serves a static landing page (`backend/app/static/index.html`, wired in
+`backend/app/landing.py`); there is no separate frontend.
 
-> **Status (2026-11-02):** backend API on PostgreSQL with full CI and the
-> GitOps tag bump, live at [demo.sandeeprn.in](https://demo.sandeeprn.in/)
-> (HTTPS; `/` is a landing page, `/docs` the API page; creating a link needs a
-> token, see below).
+> **Status (2026-11-13):** backend API on PostgreSQL with full CI and the
+> GitOps tag bump, live at [demo.sandeeprn.in](https://demo.sandeeprn.in/) on
+> a single-node k3s cluster (one Always Free Ampere A1 VM on Oracle Cloud).
+> HTTPS; `/` is a landing page, `/docs` the API page; creating a link needs a
+> token, see below. The OKE target served the site until 2026-11-12. It still
+> exists with no public way in; its teardown is issue
+> [#13](https://github.com/Sandeep-RN/oci-k8s-gitops-demo/issues/13) (due
+> 2026-11-15). For the whole picture, see the
+> [demo repo](https://github.com/Sandeep-RN/oci-k8s-gitops-demo).
 
 ## API
 
@@ -39,7 +46,8 @@ shortener** with a FastAPI backend, a static frontend and PostgreSQL storage.
     once the kubelet refreshes the mounted Secret (about a minute), with no
     restart. With no tokens, the app still starts and serves redirects; every
     create answers `401`.
-  - The comparison is constant-time. Each link stores the creating token's
+  - The comparison is constant-time (SHA-256 digests compared with
+    `hmac.compare_digest`). Each link stores the creating token's
     **name** (`created_by`, not shown by the public lookup), and the log
     records it. Token values are never logged or returned.
   - `LINK_CREATE_MODE` is `token` (the default). `open` is reserved: the app
@@ -67,8 +75,9 @@ shortener** with a FastAPI backend, a static frontend and PostgreSQL storage.
   replicas can start together safely. The same step adds the `created_by`
   column to a table created before the token gate.
 - **Metrics** for the redirect SLO are served on a separate port
-  (`METRICS_PORT`, default 9000) at `/metrics`, never on the app port, which
-  is behind the public edge (NLB and Traefik). One histogram,
+  (`METRICS_PORT`, default 9000) at `/metrics`, never on the app port. Only
+  the app port is exposed through the public edge (Traefik); the metrics port
+  is scraped by Prometheus inside the cluster. One histogram,
   `http_request_duration_seconds{method, route, status}`, labelled by route
   *template* (`/{code}`, not each code) so the number of series stays fixed;
   unmatched paths share one `<unmatched>` label. Its buckets include 0.2 s, the
@@ -84,18 +93,20 @@ No manifests belong in this repo.
 
 ```
 backend/                FastAPI service (landing page, /healthz, /readyz, link endpoints, token gate, metrics)
-frontend/               Static frontend
+frontend/               Empty placeholder; the landing page is served by the backend
 .github/workflows/      CI (ci.yml), secret scan (gitleaks.yml)
 ```
 
 ## CI (ADR 0009)
 
-On every PR: lint, test, a Trivy scan and a multi-arch (amd64 + arm64) build
-without pushing (ADR 0015). `test` is a required check on `main`. A separate
-`gitleaks` workflow scans the full git history on every PR and push. On `main`
-it also:
+On every PR: lint (ruff), test, a Trivy scan and a multi-arch (amd64 and arm64)
+build without pushing. arm64 is what runs today on the A1 node (ADR 0001,
+0002, 0022); amd64 ran on the OKE target (ADR 0015). `test` is a required
+check on `main`. A separate `gitleaks` workflow scans the full git history on
+every PR and push. On `main` it also:
 
-1. pushes the image to GHCR, tagged with the git SHA (tags are immutable), and
+1. pushes the image to GHCR, tagged with the git commit SHA (one tag per
+   commit; a tag is never reused), and
 2. opens a PR in the gitops repo that sets that tag, with auto-merge on. The PR
    merges once the gitops `validate` check passes; ArgoCD then deploys it.
    Older open bump PRs are closed as superseded.
@@ -144,6 +155,8 @@ fails if any test is skipped.
 - Changes go through a pull request (ADR 0011).
 - Install hooks once: `pip install pre-commit && pre-commit install`
   (gitleaks with custom OCI rules). CI runs gitleaks too, since
-  `--no-verify` skips hooks.
+  `--no-verify` skips hooks. Linting (ruff) runs in CI, not in the pre-commit
+  hook; run `ruff check .` and `ruff format --check .` in `backend/` yourself
+  before pushing.
 - **This repo is public.** No secrets in code, images or workflow files; use
   GitHub secrets.
