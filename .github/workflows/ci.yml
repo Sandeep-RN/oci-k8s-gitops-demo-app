@@ -18,6 +18,8 @@ concurrency:
 jobs:
   # Decides whether the image is worth building and deploying. A docs-only
   # merge must not rebuild the image, push a new tag and restart the pods.
+  # Pull requests are compared with their base; pushes to main with the commit
+  # that is deployed (see the diff step).
   # Fails safe: any doubt (new branch, force push, a git error) means "build".
   changes:
     runs-on: ubuntu-24.04
@@ -33,10 +35,36 @@ jobs:
           EVENT: ${{ github.event_name }}
           BASE_PR: ${{ github.event.pull_request.base.sha }}
           BASE_PUSH: ${{ github.event.before }}
+          # Same values as the bump-gitops job below. The gitops repo is public,
+          # so the default token can read it.
+          GITOPS_REPO: Sandeep-RN/oci-k8s-gitops-demo-gitops
+          KUSTOMIZATION: apps/link-shortener/base/kustomization.yaml
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
           base="$BASE_PUSH"
           [ "$EVENT" = "pull_request" ] && base="$BASE_PR"
+          if [ "$EVENT" = "push" ]; then
+            # On main, compare with the commit that is deployed (the image tag
+            # in the gitops repo), not with the previous push. GitHub keeps one
+            # pending run per concurrency group and drops the middle one when
+            # three merges arrive quickly. If the last merge is docs-only, the
+            # previous-push diff would skip the build and the dropped code
+            # change would never ship. Each run builds HEAD, so it also carries
+            # any dropped commit. A stale answer (bump PR not merged yet) only
+            # makes us build more, never less.
+            image_name="ghcr.io/${GITHUB_REPOSITORY,,}-backend"
+            deployed="$(gh api -H 'Accept: application/vnd.github.raw' \
+              "repos/${GITOPS_REPO}/contents/${KUSTOMIZATION}" 2>/dev/null |
+              IMAGE="$image_name" yq '.images[] | select(.name == strenv(IMAGE)) | .newTag' 2>/dev/null)" || deployed=""
+            if printf '%s' "$deployed" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "comparing with the deployed commit ${deployed}"
+              base="$deployed"
+            else
+              echo "cannot read the deployed tag; building to be safe"
+              echo "image=true" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+          fi
           # What goes into the image: the backend (its Dockerfile lives there) and
           # this workflow, whose build, scan and bump steps are part of the pipeline.
           pattern='^(backend/|\.github/workflows/ci\.yml$)'
