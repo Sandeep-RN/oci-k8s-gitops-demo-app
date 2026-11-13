@@ -1,6 +1,6 @@
 name: gitleaks
 
-# Backstop for the pre-commit hook (ADR 0011): `git commit --no-verify` skips
+# Backstop for the pre-commit hook: `git commit --no-verify` skips
 # local hooks, so every PR and push is scanned here as well. Scans the FULL
 # history, not just the new commits: a secret that was committed and later
 # deleted is still public, and must fail until it is rotated.
