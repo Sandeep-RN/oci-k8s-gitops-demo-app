@@ -1,0 +1,75 @@
+# Dependabot version updates (demo #161). Reference:
+# https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference
+#
+# Every ecosystem: weekly, Monday morning IST, minor and patch updates batched
+# into one PR per ecosystem, major updates as their own PRs so each gets a
+# deliberate review. Dependabot's default 3-day cooldown for new releases applies.
+#
+# MERGING IS A DEPLOY. ci.yml builds and pushes an image, and opens the gitops
+# tag-bump PR, whenever a push to main touches backend/** or
+# .github/workflows/ci.yml. So merging a pip PR, a docker PR or a github-actions
+# PR that edits ci.yml rolls the live site. A github-actions PR that edits only
+# gitleaks.yml does not. Review these like any other release.
+#
+# Dependabot-triggered runs get a read-only GITHUB_TOKEN and no regular Actions
+# secrets. The checks that run on pull requests (test, image build, Trivy, smoke
+# test, gitleaks) need none: the GHCR login and the tag bump (GITOPS_TOKEN) run
+# on pushes to main only.
+#
+# "Dependabot security updates" is a separate repo setting and is not enabled by
+# this file.
+version: 2
+updates:
+  # Actions are pinned by commit SHA with a version comment on the same line
+  # (`uses: owner/repo@<sha> # v1.2.3`). Dependabot updates both the SHA and
+  # that comment.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "CI"
+    groups:
+      actions-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # backend/requirements.txt (runtime, exact pins) and backend/requirements-dev.txt
+  # (test and lint tools; includes requirements.txt with -r).
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "Deps"
+    groups:
+      python-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # The base image in backend/Dockerfile (python:3.12-slim). A newer Python
+  # minor is proposed as its own PR; taking it also means moving python-version
+  # in ci.yml and target-version in pyproject.toml, so the tests run on the
+  # Python the image ships.
+  - package-ecosystem: "docker"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "Image"
+    groups:
+      docker-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
