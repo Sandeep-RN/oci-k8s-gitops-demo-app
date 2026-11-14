@@ -11,7 +11,7 @@ import os
 import psycopg
 from psycopg.errors import UniqueViolation
 from psycopg.rows import class_row
-from psycopg_pool import ConnectionPool, PoolTimeout
+from psycopg_pool import ConnectionPool, PoolClosed, PoolTimeout
 
 from app.links import CODE_LENGTH, CodeCollision, Link, StoreUnavailable
 
@@ -52,7 +52,12 @@ POOL_TIMEOUT_DEFAULT = 2.0
 READY_TIMEOUT = 1.0
 
 # Errors that mean "the database is not usable right now" rather than a bug.
-_UNAVAILABLE = (psycopg.OperationalError, PoolTimeout)
+# PoolTimeout and PoolClosed already subclass OperationalError; they are listed
+# so the intent survives a driver change. InterfaceError is a sibling, not a
+# subclass: psycopg raises it when a connection was closed under us.
+# Deliberately NOT here: DataError, ProgrammingError and friends. Those are our
+# own defects and must surface as 500s, not hide behind a 503.
+_UNAVAILABLE = (psycopg.OperationalError, psycopg.InterfaceError, PoolTimeout, PoolClosed)
 
 
 def _pool_timeout() -> float:
@@ -111,7 +116,11 @@ class PostgresLinkStore:
                 if conn.execute(_HAS_CREATED_BY).fetchone() is None:
                     log.info("adding links.created_by")
                     conn.execute(_ADD_CREATED_BY)
-        except _UNAVAILABLE as e:
+        except psycopg.Error as e:
+            # Any database error here (also a missing DDL privilege, a lock
+            # timeout) means the store cannot be used yet. Unlike the request
+            # path, nothing in this step takes user input, so there is no bug
+            # to hide. _schema_ready stays False: the next request retries.
             raise StoreUnavailable(str(e)) from e
         self._schema_ready = True
 
