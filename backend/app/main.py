@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Path, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from prometheus_client import REGISTRY, CollectorRegistry
@@ -14,7 +14,6 @@ from pydantic import AfterValidator, AnyHttpUrl, BaseModel
 from app import landing, links
 from app.auth import DirectoryTokens, NoTokens, TokenSource, match_token
 from app.links import (
-    CODE_PATTERN,
     CodeCollision,
     InMemoryLinkStore,
     LinkStore,
@@ -67,19 +66,26 @@ def _max_length(url: AnyHttpUrl) -> AnyHttpUrl:
     return url
 
 
+def _no_credentials(url: AnyHttpUrl) -> AnyHttpUrl:
+    # user:pass@host would be stored and echoed back in a Location header, and
+    # browsers show the host after the "@" as the destination: both are abuse
+    # vectors for a public redirector. (FastAPI's 422 body echoes the rejected
+    # input back to the sender only; nothing is stored or logged by this code.)
+    if url.username is not None or url.password is not None:
+        raise ValueError("URLs with embedded credentials are not accepted")
+    return url
+
+
 class LinkIn(BaseModel):
     # AnyHttpUrl accepts only http and https, which rules out javascript: and
     # other schemes that would turn a redirect into an attack.
-    url: Annotated[AnyHttpUrl, AfterValidator(_max_length)]
+    url: Annotated[AnyHttpUrl, AfterValidator(_max_length), AfterValidator(_no_credentials)]
 
 
 class LinkOut(BaseModel):
     code: str
     url: str
     created_at: datetime
-
-
-Code = Annotated[str, Path(pattern=CODE_PATTERN)]
 
 
 def create_app(
@@ -172,7 +178,12 @@ def create_app(
         raise RuntimeError(f"no free code after {links.MAX_CREATE_ATTEMPTS} attempts")
 
     @app.get("/api/links/{code}", response_model=LinkOut)
-    def get_link(code: Code) -> LinkOut:
+    def get_link(code: str) -> LinkOut:
+        # Validated here, not with Path(pattern=...), for the same reason as the
+        # redirect route: a malformed code is a plain 404, not a 422 that
+        # describes the code format.
+        if not links.is_valid_code(code):
+            raise HTTPException(status_code=404, detail="not found")
         link = store.get(code)
         if link is None:
             raise HTTPException(status_code=404, detail="not found")
@@ -182,7 +193,9 @@ def create_app(
     def landing_page() -> HTMLResponse:
         return HTMLResponse(landing_html, headers=landing.HEADERS)
 
-    @app.get("/{code}")
+    # HEAD too: link checkers and `curl -I` use it. Starlette sends no body.
+    # The route template stays "/{code}", which the SLO queries select on.
+    @app.api_route("/{code}", methods=["GET", "HEAD"])
     def redirect(code: str) -> RedirectResponse:
         # Validated here, not with Path(pattern=...), so a malformed code is a
         # plain 404 rather than a 422 that describes the code format.
