@@ -80,7 +80,7 @@ class DirectoryTokens:
                 continue
             try:
                 value = entry.read_text(encoding="utf-8").strip()
-            except (OSError, UnicodeDecodeError):
+            except OSError, UnicodeDecodeError:
                 self._warn_once(f"read:{name}", "ignoring unreadable link token %s", name)
                 continue
             if len(value) < MIN_TOKEN_LENGTH:

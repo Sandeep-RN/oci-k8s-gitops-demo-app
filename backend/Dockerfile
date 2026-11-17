@@ -1,6 +1,6 @@
 # Multi-arch image (amd64 + arm64, ADR 0015): a slim base keeps both small and
 # there are no compiled wheels to cross-build.
-FROM python:3.12-slim AS base
+FROM python:3.15-slim AS base
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /srv
 
@@ -8,10 +8,18 @@ WORKDIR /srv
 # (Trivy gate, demo #112: zlib1g HIGH CVEs with a fix available). Scoped to the
 # one package so builds stay predictable; delete this layer once the upstream
 # python image ships the fix. Runs as root, before USER, and leaves no apt lists.
+# Re-tested 2026-11-17 on python:3.15-slim (Debian 13.7): still needed, the scan
+# fails on zlib1g (CVE-2026-85091) without it (demo #187).
 RUN apt-get update     && apt-get install -y --no-install-recommends --only-upgrade zlib1g     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+# pip is removed in the SAME layer as the install, so no layer keeps it. The
+# base image's pip vendors its own copies of msgpack, setuptools and urllib3,
+# and Trivy fails the build on their HIGH CVEs (demo #187). Upgrading pip is not
+# enough: even pip 26.3 still vendors setuptools 70.3.0. The app never runs pip,
+# so removing it is safe and also shrinks the image's attack surface. If the
+# uninstall ever fails, the build stops: a loud failure, never a silent one.
+RUN pip install -r requirements.txt && pip uninstall -y pip
 
 COPY app ./app
 
