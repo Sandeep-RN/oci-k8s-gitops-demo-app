@@ -280,10 +280,12 @@ jobs:
           gh pr merge "$pr" --repo "$GITOPS_REPO" --auto --squash --delete-branch
           echo "Opened ${pr}"
 
-          # Older open bumps would conflict with this one and deploy stale tags.
+          # Older open bumps would conflict with this one and deploy stale tags. Match on the
+          # branch prefix so another app's bumps (the on-call assistant uses the same tag-bump
+          # label) are never closed.
           gh pr list --repo "$GITOPS_REPO" --label tag-bump --state open \
             --json number,headRefName \
-            --jq ".[] | select(.headRefName != \"${branch}\") | .number" |
+            --jq ".[] | select(.headRefName | startswith(\"bump/backend-\")) | select(.headRefName != \"${branch}\") | .number" |
           while read -r old; do
             gh pr close "$old" --repo "$GITOPS_REPO" --delete-branch \
               --comment "Superseded by ${pr}."
