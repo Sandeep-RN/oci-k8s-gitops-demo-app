@@ -1,4 +1,4 @@
-fastapi==0.163.0
+fastapi==0.165.0
 # Pinned directly: older Starlette releases carry HIGH CVEs that the CI Trivy scan fails on.
 starlette==1.10.0
 uvicorn[standard]==0.54.0
