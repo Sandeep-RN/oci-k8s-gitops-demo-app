@@ -11,7 +11,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from prometheus_client import REGISTRY, CollectorRegistry
 from pydantic import AfterValidator, AnyHttpUrl, BaseModel
 
-from app import landing, links
+from app import docs_page, landing, links
 from app.auth import DirectoryTokens, NoTokens, TokenSource, match_token
 from app.links import (
     CodeCollision,
@@ -28,6 +28,8 @@ log = logging.getLogger("app")
 ReadinessCheck = Callable[[], bool]
 
 MAX_URL_LENGTH = 2048
+API_DOCS_URL = "/api/docs"
+API_OPENAPI_URL = "/api/openapi.json"
 METRICS_PORT_DEFAULT = 9000
 # Where the link-creation tokens are mounted (one file per token, ADR 0020).
 LINK_TOKENS_DIR_DEFAULT = "/etc/link-shortener/tokens"
@@ -101,7 +103,17 @@ def create_app(
     store = store if store is not None else InMemoryLinkStore()
     # No token source means no tokens: creation fails closed.
     token_source: TokenSource = tokens if tokens is not None else NoTokens()
-    app = FastAPI(title="link-shortener", lifespan=lifespan)
+    # The docs live under /api (issue #229): the default /docs, /redoc and
+    # /openapi.json are switched off. Old /docs needs no redirect: it is not a
+    # valid 7-character code, so the /{code} route already answers a plain 404.
+    # ReDoc is dropped; one docs UI is enough.
+    app = FastAPI(
+        title="link-shortener",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=API_OPENAPI_URL,
+    )
     # Read once: a missing file fails at startup, not on the first visit.
     landing_html = landing.render(example_code)
     # A private registry by default: metrics can only be registered once per
@@ -188,6 +200,13 @@ def create_app(
         if link is None:
             raise HTTPException(status_code=404, detail="not found")
         return LinkOut(code=link.code, url=link.url, created_at=link.created_at)
+
+    # Registered before /{code}. "/api/docs" has two segments, so it can never
+    # be a code (one segment, exactly 7 characters). It has no CSP: Swagger UI
+    # loads its script and CSS from a CDN (the same as FastAPI's default page).
+    @app.get(API_DOCS_URL, include_in_schema=False)
+    def api_docs() -> HTMLResponse:
+        return docs_page.swagger_page(openapi_url=API_OPENAPI_URL, title=f"{app.title} API docs")
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def landing_page() -> HTMLResponse:
