@@ -13,6 +13,7 @@ import pytest
 
 from app import status
 from app.status import PrometheusQuery, QueryError
+from tests.loopback import DripServer, RedirectServer
 
 BASE = "http://prometheus.example.invalid:9090"
 
@@ -28,11 +29,10 @@ class FakeResponse(io.BytesIO):
 
 
 class FakeOpener:
-    def __init__(self, body=b"", error=None, status_code=200, chunk_delay=0.0):
+    def __init__(self, body=b"", error=None, status_code=200):
         self.body = body
         self.error = error
         self.status_code = status_code
-        self.chunk_delay = chunk_delay
         self.requests = []
 
     def open(self, request, timeout=None):
@@ -41,14 +41,6 @@ class FakeOpener:
             raise self.error
         response = FakeResponse(self.body)
         response.status = self.status_code
-        if self.chunk_delay:
-            real_read = response.read
-
-            def slow_read(n=-1):
-                time.sleep(self.chunk_delay)
-                return real_read(min(n, 4) if n and n > 0 else 4)
-
-            response.read = slow_read
         return response
 
 
@@ -183,8 +175,35 @@ def test_a_wrong_shape_or_invalid_json_is_a_query_error(body):
         client(FakeOpener(body))("q")
 
 
-def test_a_body_over_one_mebibyte_is_refused():
-    huge = vector(series("1", pad="x" * 400)) + b" " * (1024 * 1024)
+def test_the_response_cap_is_64_kib_and_a_realistic_answer_is_far_under_it():
+    # Review of PR #42 (M2): 1 MiB x 6 workers cost ~125 MiB of Python memory per
+    # refresh. The largest real answer is a few KB, so the cap can be small.
+    assert status.MAX_RESPONSE_BYTES == 64 * 1024
+    assert status.QUERY_WORKERS == 3
+    apps = [
+        series(
+            "1",
+            name=f"app-{i}",
+            namespace="argocd",
+            project="default",
+            repo="https://example.invalid/org/repo.git",
+            dest_server="https://kubernetes.default.svc",
+            dest_namespace="link-shortener",
+            sync_status="Synced",
+            health_status="Healthy",
+            autosync_enabled="true",
+            instance="10.0.0.9:8082",
+            job="argocd-metrics",
+        )
+        for i in range(20)
+    ]
+    body = vector(*apps)
+    assert len(body) < status.MAX_RESPONSE_BYTES // 3
+    assert len(client(FakeOpener(body))("q")) == 20
+
+
+def test_a_body_over_the_cap_is_refused():
+    huge = vector(series("1", pad="x" * 400)) + b" " * status.MAX_RESPONSE_BYTES
     with pytest.raises(QueryError, match="large"):
         client(FakeOpener(huge))("q")
 
@@ -197,7 +216,7 @@ def test_a_body_just_under_the_cap_is_read():
 
 
 def test_thousands_of_series_are_refused():
-    many = [series("1", i=str(i)) for i in range(status.MAX_SERIES + 1)]
+    many = [series("1") for _ in range(status.MAX_SERIES + 1)]  # small enough for the byte cap
     with pytest.raises(QueryError, match="series"):
         client(FakeOpener(vector(*many)))("q")
 
@@ -224,15 +243,6 @@ def test_network_failures_become_a_query_error(error):
         client(FakeOpener(error=error))("q")
 
 
-def test_the_whole_read_is_bounded_not_just_each_socket_operation():
-    # A server that drips bytes keeps every single recv under the socket timeout.
-    opener = FakeOpener(vector(series("1")), chunk_delay=0.05)
-    started = time.monotonic()
-    with pytest.raises(QueryError, match="slow"):
-        PrometheusQuery(BASE, timeout=0.3, opener=opener)("q")
-    assert time.monotonic() - started < 1.5
-
-
 @pytest.mark.parametrize(
     "url",
     [
@@ -247,6 +257,11 @@ def test_the_whole_read_is_bounded_not_just_each_socket_operation():
         "//prometheus:9090",
         "http://prometheus:notaport",
         "http://pro metheus:9090",
+        "http://prometheus:0",  # port 0 is never a listening port
+        "http://prometheus\x00:9090",
+        "http://prom\retheus:9090",
+        "http://prometheus:9090/\x1b[31m",
+        "http://prometheus:9090/pa\x7fth",
     ],
 )
 def test_an_unusable_base_url_is_refused_when_building_the_client(url):
@@ -266,15 +281,9 @@ def test_a_path_prefix_in_the_base_url_is_kept():
 
 class _Handler(BaseHTTPRequestHandler):
     seen: list[str] = []
-    mode = "ok"
 
     def do_GET(self):  # noqa: N802
         type(self).seen.append(self.path)
-        if type(self).mode == "redirect":
-            self.send_response(302)
-            self.send_header("Location", "http://127.0.0.1:1/elsewhere")
-            self.end_headers()
-            return
         body = vector(series("0.5", instance="10.0.0.9:9100"))
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -289,7 +298,6 @@ class _Handler(BaseHTTPRequestHandler):
 @pytest.fixture
 def loopback():
     _Handler.seen = []
-    _Handler.mode = "ok"
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -305,14 +313,113 @@ def test_the_default_opener_talks_real_http(loopback):
     assert parse_qs(urlsplit(_Handler.seen[0]).query) == {"query": ['up{job="a b"}']}
 
 
-def test_the_default_opener_does_not_follow_redirects(loopback):
-    _Handler.mode = "redirect"
-    with pytest.raises(QueryError):
-        PrometheusQuery(loopback)("up")
-    assert len(_Handler.seen) == 1
+def test_the_default_opener_does_not_follow_redirects():
+    # The redirect points at ANOTHER PATH ON THE SAME SERVER, so "was it followed"
+    # is visible: the path would be requested. (A redirect to a closed port fails
+    # the same way whether or not it was followed: the review of PR #42, M3.)
+    server = RedirectServer()
+    try:
+        with pytest.raises(QueryError):
+            PrometheusQuery(server.url)("up")
+        assert len(server.seen) == 1
+        assert not any(path.startswith("/elsewhere") for path in server.seen)
+    finally:
+        server.close()
 
 
 def test_the_default_opener_ignores_proxy_environment_variables(loopback, monkeypatch):
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
     monkeypatch.setenv("http_proxy", "http://127.0.0.1:1")
     assert PrometheusQuery(loopback)("up")[0].value == 0.5
+
+
+# ---- a hostile server that dribbles bytes (review of PR #42, M1 and M3) -----------
+# Each byte arrives well inside the 2 s socket timeout, so only a bound on the
+# WHOLE exchange can stop it. Real sockets: the fake opener these tests used to
+# have replaced the very code that was wrong.
+
+
+@pytest.fixture
+def drip():
+    servers = []
+
+    def make(mode, interval=0.05):
+        servers.append(DripServer(mode, interval))
+        return servers[-1]
+
+    yield make
+    for server in servers:
+        server.close()
+
+
+def test_a_body_dribbled_one_byte_at_a_time_is_cut_off_at_the_query_timeout(drip, monkeypatch):
+    # The watchdog is parked far away so ONLY the read loop's own deadline can
+    # save this: read(8192) would block until 8192 bytes arrive (about 7 minutes
+    # at this speed); read1() returns after one receive and lets the deadline run.
+    monkeypatch.setattr(status, "WATCHDOG_GRACE", 30.0)
+    server = drip("body")
+    started = time.monotonic()
+    with pytest.raises(QueryError, match="too slow"):
+        PrometheusQuery(server.url, timeout=0.4)("up")
+    assert time.monotonic() - started < 1.5
+
+
+def test_headers_dribbled_one_byte_at_a_time_are_cut_off_by_the_watchdog(drip):
+    # No body is ever reached: the status line and a header never finish. Neither
+    # the socket timeout nor the body deadline can fire; the watchdog closes the
+    # socket from another thread.
+    server = drip("headers", interval=0.3)  # under the 0.4 s socket timeout
+    started = time.monotonic()
+    with pytest.raises(QueryError, match="too slow"):
+        PrometheusQuery(server.url, timeout=0.4)("up")
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.4 + status.WATCHDOG_GRACE + 0.8
+
+
+@pytest.mark.parametrize("mode", ["body", "headers"])
+def test_the_socket_is_really_closed_after_a_cut_off(drip, mode):
+    server = drip(mode)
+    with pytest.raises(QueryError):
+        PrometheusQuery(server.url, timeout=0.3)("up")
+    assert server.peer_gone.wait(3), "the client left its socket open"
+
+
+def test_the_watchdog_timer_does_not_outlive_a_normal_query(loopback):
+    def timers():
+        return [t for t in threading.enumerate() if isinstance(t, threading.Timer)]
+
+    before = len(timers())
+    for _ in range(5):
+        assert PrometheusQuery(loopback)("up")[0].value == 0.5
+    # Each call arms a timer and must cancel it: none may sit out its 2.5 s.
+    deadline = time.monotonic() + 1.0
+    while len(timers()) > before and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(timers()) <= before
+
+
+# ---- what an error may say (review of PR #42, info) --------------------------------
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"status":"error","errorType":"bad_data","error":"CANARY-LABEL secret=hunter2"}',
+        b'{"status":"success","data":{"resultType":"matrix","result":"CANARY-LABEL"}}',
+        b'{"status":"success","data":{"resultType":"vector","result":{"CANARY-LABEL":1}}}',
+        b"CANARY-LABEL not json",
+        b'{"status":"success","data":{"resultType":"vector","result":[NaN,"CANARY-LABEL"]}}',
+    ],
+)
+def test_a_query_error_message_never_carries_body_or_label_text(body):
+    with pytest.raises(QueryError) as caught:
+        client(FakeOpener(body))("q")
+    assert "CANARY" not in str(caught.value)
+    assert "hunter2" not in str(caught.value)
+
+
+def test_a_failed_request_message_names_the_exception_type_only():
+    error = urllib.error.URLError("refused by http://10.1.2.3:9090 CANARY-LABEL")
+    with pytest.raises(QueryError) as caught:
+        client(FakeOpener(error=error))("q")
+    assert str(caught.value) == "prometheus request failed: URLError"

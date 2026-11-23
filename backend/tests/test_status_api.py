@@ -33,20 +33,33 @@ def test_the_route_does_not_exist_when_the_feature_is_off():
     assert "/api/status" not in client.get("/api/openapi.json").text
 
 
-def test_503_with_a_fixed_body_until_a_refresh_has_succeeded():
+def test_200_available_false_until_a_refresh_has_succeeded():
+    # Review of PR #42 (L2): a 5xx here would count in Traefik's server-error
+    # alert for every visitor during startup or a Prometheus outage at boot.
     client, service, fake, _, _ = make()
     r = client.get("/api/status")
-    assert r.status_code == 503
-    assert r.json() == {"detail": "status not available yet"}
-    assert "max-age" not in r.headers.get("cache-control", "")  # a 503 must not be cached
+    assert r.status_code == 200
+    assert r.json() == {"available": False}
+    assert r.headers["cache-control"] == "no-store"
     assert fake.calls == []  # and the request did not go to Prometheus
 
 
-def test_503_stays_when_every_refresh_failed():
+def test_available_false_stays_when_every_refresh_failed():
     client, service, fake, _, _ = make()
     fake.fail_all()
     service.refresh_once()
-    assert client.get("/api/status").status_code == 503
+    r = client.get("/api/status")
+    assert (r.status_code, r.json()) == (200, {"available": False})
+    assert r.headers["cache-control"] == "no-store"
+
+
+def test_a_snapshot_has_no_available_key_and_replaces_the_placeholder():
+    client, service, _, _, _ = make()
+    assert client.get("/api/status").json() == {"available": False}
+    service.refresh_once()
+    body = client.get("/api/status").json()
+    assert "available" not in body
+    assert body["slo"]["target"] == 99.5
 
 
 def test_200_with_the_snapshot_and_a_short_public_cache():
@@ -207,7 +220,7 @@ def test_health_and_readiness_ignore_a_prometheus_that_raises():
         assert fake.calls, "the refresher never ran"
         assert client.get("/healthz").json() == {"status": "ok"}
         assert client.get("/readyz").json() == {"status": "ready"}
-        assert client.get("/api/status").status_code == 503
+        assert client.get("/api/status").json() == {"available": False}
 
 
 def test_the_health_routes_do_not_mention_status_or_touch_the_query():
