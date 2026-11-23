@@ -8,7 +8,7 @@ serves a static landing page (`backend/app/static/index.html`, wired in
 > **Status (2026-11-13):** backend API on PostgreSQL with full CI and the
 > GitOps tag bump, live at [demo.sandeeprn.in](https://demo.sandeeprn.in/) on
 > a single-node k3s cluster (one Always Free Ampere A1 VM on Oracle Cloud).
-> HTTPS; `/` is a landing page, `/docs` the API page; creating a link needs a
+> HTTPS; `/` is a landing page, `/api/docs` the API page; creating a link needs a
 > token, see below. The OKE target served the site until 2026-11-12. It still
 > exists with no public way in; its teardown is issue
 > [#13](https://github.com/Sandeep-RN/oci-k8s-gitops-demo/issues/13) (due

@@ -3,26 +3,73 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>demo.sandeeprn.in: a link shortener on Kubernetes</title>
 <style>
-  body { font: 16px/1.55 system-ui, sans-serif; max-width: 42rem; margin: 2.5rem auto;
-         padding: 0 1rem; color: #1f2328; background: #fff; }
-  h1 { font-size: 1.6rem; margin-bottom: .25rem; }
-  h2 { font-size: 1.1rem; margin-top: 2rem; }
-  p.lead { color: #59636e; margin-top: 0; }
-  a { color: #0969da; }
-  code { font: .9em ui-monospace, monospace; background: #f6f8fa; padding: .1em .3em;
+  :root { --bg: #fff; --fg: #1f2328; --muted: #59636e; --link: #0969da; --card: #f6f8fa;
+          --line: #d1d9e0; --accent: #0969da; --accent-bg: #ddf4ff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0a0c12; --fg: #e6edf3; --muted: #9aa4b2; --link: #6cb0ff; --card: #131722;
+            --line: #2a3142; --accent: #6cb0ff; --accent-bg: #16253d; }
+  }
+  * { box-sizing: border-box; }
+  body { font: 16px/1.55 system-ui, sans-serif; margin: 0; color: var(--fg); background: var(--bg); }
+  a { color: var(--link); }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .wrap { max-width: 56rem; margin: 0 auto; padding: 0 1rem; }
+  header { border-bottom: 1px solid var(--line); }
+  nav { display: flex; flex-wrap: wrap; gap: .25rem 1.25rem; padding: .75rem 1rem; align-items: center; }
+  nav .brand { font-weight: 600; margin-right: auto; color: var(--fg); text-decoration: none; }
+  nav a { text-decoration: none; }
+  nav a:hover { text-decoration: underline; }
+  h1 { font-size: 1.9rem; margin: 2rem 0 .25rem; line-height: 1.2; }
+  h2 { font-size: 1.15rem; margin: 2.25rem 0 .75rem; }
+  p.lead { color: var(--muted); margin-top: 0; font-size: 1.05rem; }
+  code { font: .9em ui-monospace, monospace; background: var(--card); padding: .1em .3em;
          border-radius: 4px; }
   li { margin: .35rem 0; }
-  @media (prefers-color-scheme: dark) {
-    body { color: #e6edf3; background: #0d1117; }
-    p.lead { color: #9198a1; }
-    a { color: #4493f8; }
-    code { background: #161b22; }
+  .badges { list-style: none; padding: 0; margin: 1rem 0; display: flex; flex-wrap: wrap; gap: .4rem; }
+  .badges li { margin: 0; padding: .15rem .65rem; border: 1px solid var(--line);
+               border-radius: 999px; background: var(--card); font-size: .85rem; }
+  .proof { list-style: none; padding: 0; margin: 0; display: grid; gap: .75rem;
+           grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); }
+  .proof li { margin: 0; padding: .75rem 1rem; border: 1px solid var(--line); border-radius: 8px;
+              background: var(--card); }
+  .proof .n { display: block; font-size: 2rem; font-weight: 700; line-height: 1.1; }
+  .proof .l { color: var(--muted); font-size: .85rem; }
+  .cards { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); }
+  .card { padding: 1rem; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+  .card h3 { margin: 0 0 .35rem; font-size: 1rem; }
+  .card p { margin: 0; font-size: .92rem; }
+  figure { margin: 0; }
+  figcaption { color: var(--muted); font-size: .85rem; margin-top: .5rem; }
+  svg { width: 100%; height: auto; display: block; }
+  svg text { fill: var(--fg); font: 13px system-ui, sans-serif; }
+  svg .sub { fill: var(--muted); font-size: 11px; }
+  svg .box { fill: var(--card); stroke: var(--line); stroke-width: 1.5; }
+  svg .hot { fill: var(--accent-bg); stroke: var(--accent); stroke-width: 1.5; }
+  svg .zone { fill: none; stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 5 4; }
+  svg .arrow { stroke: var(--muted); stroke-width: 1.6; fill: none; }
+  svg .head { fill: var(--muted); }
+  footer { border-top: 1px solid var(--line); margin-top: 3rem; padding: 1rem 0 2rem;
+           color: var(--muted); font-size: .85rem; }
+  @media (max-width: 40rem) {
+    h1 { font-size: 1.5rem; }
+    nav .brand { flex-basis: 100%; }
   }
 </style>
 </head>
 <body>
+<header>
+  <nav class="wrap" aria-label="Main">
+    <a class="brand" href="/">demo.sandeeprn.in</a>
+    <a href="/">Link shortener</a>
+    <a href="/api/docs">API docs</a>
+    <a href="https://ask.sandeeprn.in">On-call assistant</a>
+    <a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo">Source</a>
+  </nav>
+</header>
+<main class="wrap">
 <h1>A link shortener on Kubernetes</h1>
 <p class="lead">A public demo of a small service run the way production services are run.</p>
 
@@ -31,11 +78,108 @@ It runs on Kubernetes on Oracle Cloud, deployed by GitOps: every change is a pul
 request, CI builds and scans the image, and Argo CD rolls it out. Prometheus tracks
 a 7-day service level objective for the redirects and alerts when it burns too fast.</p>
 
+<ul class="badges" aria-label="Technology stack">
+  <li>Python</li><li>FastAPI</li><li>PostgreSQL</li><li>k3s on OCI Always Free A1</li>
+  <li>Traefik</li><li>Argo CD</li><li>Prometheus</li><li>Terraform</li>
+  <li>GitHub Actions</li><li>Sealed Secrets</li><li>cert-manager</li>
+</ul>
+
 <h2>Try it</h2>
 <ul>
-<!--example-->  <li><a href="/docs">API documentation</a>: every endpoint. Redirects and lookups
+<!--example-->  <li><a href="/api/docs">API documentation</a>: every endpoint. Redirects and lookups
     are public; creating a link needs a token, so this page has no form.</li>
 </ul>
+
+<h2>How a request flows</h2>
+<figure>
+<svg viewBox="0 0 720 360" role="img" aria-labelledby="flow-t flow-d">
+  <title id="flow-t">Request flow and delivery pipeline</title>
+  <desc id="flow-d">A visitor's request goes through Cloudflare DNS, the node firewall and
+  Traefik to the link shortener app, which reads Postgres. Traefik, the app, Postgres,
+  Prometheus and Argo CD run on one k3s node. Prometheus scrapes the app. Argo CD syncs
+  manifests from the gitops repository. GitHub Actions builds the image and commits the new
+  image tag to the gitops repository.</desc>
+  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
+    orient="auto-start-reverse"><path class="head" d="M0 0L10 5L0 10z"/></marker></defs>
+  <path class="zone" d="M0 90H720V176H490V262H0Z"/>
+  <text class="sub" x="10" y="84">k3s node (OCI Always Free A1)</text>
+  <g><rect class="box" x="10" y="14" width="200" height="56" rx="8"/>
+    <text x="110" y="38" text-anchor="middle">Visitor</text>
+    <text class="sub" x="110" y="56" text-anchor="middle">browser or curl</text></g>
+  <g><rect class="box" x="260" y="14" width="200" height="56" rx="8"/>
+    <text x="360" y="38" text-anchor="middle">Cloudflare DNS</text>
+    <text class="sub" x="360" y="56" text-anchor="middle">name to node address</text></g>
+  <g><rect class="box" x="510" y="14" width="200" height="56" rx="8"/>
+    <text x="610" y="38" text-anchor="middle">Node firewall</text>
+    <text class="sub" x="610" y="56" text-anchor="middle">only 80/443 public</text></g>
+  <g><rect class="box" x="510" y="100" width="200" height="56" rx="8"/>
+    <text x="610" y="124" text-anchor="middle">Traefik</text>
+    <text class="sub" x="610" y="142" text-anchor="middle">ingress, TLS from cert-manager</text></g>
+  <g><rect class="hot" x="260" y="100" width="200" height="56" rx="8"/>
+    <text x="360" y="124" text-anchor="middle">link-shortener app</text>
+    <text class="sub" x="360" y="142" text-anchor="middle">FastAPI</text></g>
+  <g><rect class="box" x="10" y="100" width="200" height="56" rx="8"/>
+    <text x="110" y="124" text-anchor="middle">Postgres</text>
+    <text class="sub" x="110" y="142" text-anchor="middle">links, nightly dump</text></g>
+  <g><rect class="box" x="260" y="190" width="200" height="56" rx="8"/>
+    <text x="360" y="214" text-anchor="middle">Prometheus</text>
+    <text class="sub" x="360" y="232" text-anchor="middle">scrapes metrics, SLO alerts</text></g>
+  <g><rect class="box" x="10" y="190" width="200" height="56" rx="8"/>
+    <text x="110" y="214" text-anchor="middle">Argo CD</text>
+    <text class="sub" x="110" y="232" text-anchor="middle">applies what Git says</text></g>
+  <g><rect class="box" x="510" y="190" width="200" height="56" rx="8"/>
+    <text x="610" y="214" text-anchor="middle">GitHub Actions</text>
+    <text class="sub" x="610" y="232" text-anchor="middle">test, build, scan image</text></g>
+  <g><rect class="hot" x="10" y="290" width="700" height="52" rx="8"/>
+    <text x="360" y="314" text-anchor="middle">gitops repository (Git)</text>
+    <text class="sub" x="360" y="331" text-anchor="middle">the desired state of the cluster</text></g>
+  <path class="arrow" marker-end="url(#ah)" d="M210 42H258"/>
+  <path class="arrow" marker-end="url(#ah)" d="M460 42H508"/>
+  <path class="arrow" marker-end="url(#ah)" d="M610 70V98"/>
+  <path class="arrow" marker-end="url(#ah)" d="M510 128H462"/>
+  <path class="arrow" marker-end="url(#ah)" d="M260 128H212"/>
+  <path class="arrow" marker-end="url(#ah)" d="M360 188V158"/>
+  <path class="arrow" marker-end="url(#ah)" d="M110 288V248"/>
+  <path class="arrow" marker-end="url(#ah)" d="M610 248V288"/>
+  <text class="sub" x="368" y="176">scrapes</text>
+  <text class="sub" x="118" y="272">syncs</text>
+  <text class="sub" x="618" y="272">commits image tag</text>
+</svg>
+<figcaption>Top: a request. Bottom: how a change reaches the node. The node is one VM, so
+this is not high availability; the decisions behind it are in the
+<a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo/tree/main/docs/adr">ADRs</a>.</figcaption>
+</figure>
+
+<h2>The project in numbers</h2>
+<ul class="proof">
+  <li><a class="n" href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo/tree/main/docs/adr">25</a>
+    <span class="l">architecture decision records</span></li>
+  <li><a class="n" href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo/tree/main/docs/runbooks">9</a>
+    <span class="l">runbooks</span></li>
+  <li><a class="n" href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo/blob/main/docs/runbooks/postgres-backup-restore.md">3</a>
+    <span class="l">database restores (a drill, the cluster move, the rebuild)</span></li>
+  <li><a class="n" href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo/pulls?q=is%3Apr+is%3Amerged">216</a>
+    <span class="l">merged pull requests, counted 2026-11-23:
+    <a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo/pulls?q=is%3Apr+is%3Amerged">demo 76</a>,
+    <a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo-app/pulls?q=is%3Apr+is%3Amerged">app 36</a>,
+    <a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo-gitops/pulls?q=is%3Apr+is%3Amerged">gitops 104</a></span></li>
+</ul>
+
+<h2>What is inside</h2>
+<div class="cards">
+  <div class="card"><h3>SLO</h3>
+    <p>99.5% of redirects must succeed over a rolling 7 days. Burn-rate alerts go to
+    Discord. <a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo/blob/main/docs/runbooks/slo-redirect-availability.md">Runbook</a></p></div>
+  <div class="card"><h3>GitOps</h3>
+    <p>No manual <code>kubectl apply</code>. Argo CD syncs from Git and reverts drift.
+    <a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo/blob/main/docs/adr/0023-argocd-app-of-apps-with-prune-and-self-heal.md">ADR 0023</a></p></div>
+  <div class="card"><h3>Cost</h3>
+    <p>One Always Free Ampere A1 VM runs the whole site.
+    <a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo/blob/main/docs/adr/0001-single-node-k3s-on-always-free-a1.md">ADR 0001</a></p></div>
+  <div class="card"><h3>On-call assistant</h3>
+    <p>A second app on the same node answers on-call questions from this project's
+    documents, with citations. <a href="https://ask.sandeeprn.in">Ask it</a></p></div>
+</div>
 
 <h2>Source</h2>
 <ul>
@@ -48,5 +192,7 @@ a 7-day service level objective for the redirects and alerts when it burns too f
   <li><a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo-gitops">oci-k8s-gitops-demo-gitops</a>:
     Kubernetes manifests that Argo CD deploys</li>
 </ul>
+</main>
+<footer><div class="wrap">Numbers counted from the repositories on 2026-11-23; each links to its source.</div></footer>
 </body>
 </html>

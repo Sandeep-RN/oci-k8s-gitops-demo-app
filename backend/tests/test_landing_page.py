@@ -30,19 +30,22 @@ def test_root_is_a_cacheable_html_page(client):
 
 def test_root_links_to_the_api_docs_and_the_three_repos(client):
     html = client.get("/").text
-    assert 'href="/docs"' in html
+    assert 'href="/api/docs"' in html
+    assert 'href="/docs"' not in html
     for repo in REPOS:
         assert f'href="{repo}"' in html
 
 
 def test_root_is_small_with_no_scripts_or_third_party_assets(client):
     r = client.get("/")
-    assert len(r.content) < 10 * 1024
+    assert len(r.content) < 50 * 1024
     html = r.text.lower()
     assert "<script" not in html
     # Outside URLs appear only as plain links (href), never as loaded assets.
-    for attr in ("src=", "<link", "@import", "url("):
+    for attr in ("src=", "<link", "@import"):
         assert attr not in html
+    # url(...) is allowed only as a same-page fragment (the SVG arrowhead).
+    assert not re.search(r"url\((?!#)", html)
 
 
 def test_root_sends_a_csp_that_allows_no_scripts_or_outside_assets(client):
@@ -74,3 +77,34 @@ def test_an_invalid_example_code_is_left_out_not_fatal(bad, caplog):
     assert "<b>" not in r.text
     if bad:
         assert "EXAMPLE_LINK_CODE" in caplog.text
+
+
+def test_root_links_to_the_assistant_and_has_a_header_nav(client):
+    html = client.get("/").text
+    assert 'href="https://ask.sandeeprn.in"' in html
+    assert "<nav" in html
+
+
+def test_root_has_an_accessible_diagram_and_dark_mode(client):
+    html = client.get("/").text
+    assert "<svg" in html and 'role="img"' in html
+    assert "<title" in html.split("<svg", 1)[1]
+    assert "prefers-color-scheme: dark" in html
+    assert "#0a0c12" in html
+
+
+def test_root_proof_numbers_link_to_their_sources(client):
+    html = client.get("/").text
+    for source in (
+        "demo/tree/main/docs/adr",
+        "demo/tree/main/docs/runbooks",
+        "postgres-backup-restore.md",
+        "/pulls?q=is%3Apr+is%3Amerged",
+    ):
+        assert source in html
+
+
+def test_root_is_mobile_friendly(client):
+    html = client.get("/").text
+    assert 'name="viewport"' in html
+    assert "@media (max-width" in html
