@@ -2,15 +2,22 @@
 # No network: Prometheus is a fake callable.
 import json
 import math
+import os
+import subprocess
+import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from prometheus_client import CollectorRegistry
 
 from app import status
 from app.status import Sample, StatusService
+from tests.loopback import DripServer
 from tests.status_helpers import SHA, Clock, FakePrometheus, default_answers
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
 
 # The exact allowlist (ADR 0026): adding a query means changing this test on purpose.
 EXPECTED_QUERIES = {
@@ -22,7 +29,7 @@ EXPECTED_QUERIES = {
     "1-node_memory_MemAvailable_bytes/node_memory_MemTotal_bytes",
     'sum(rate(node_network_transmit_bytes_total{device!~"lo|veth.*|cni.*|flannel.*"}[5m]))',
     'count(kube_pod_status_phase{phase="Running"}==1)',
-    'kube_pod_container_info{namespace="link-shortener",container="backend"}',
+    'kube_pod_container_info{namespace="link-shortener",container="backend",pod=~"backend-.*"}',
     'max(kube_pod_start_time{namespace="link-shortener",pod=~"backend-.*"})',
     "argocd_app_info",
 }
@@ -388,7 +395,13 @@ def test_a_hung_query_cannot_hold_a_refresh_past_its_cap_and_others_still_land()
     assert p["node"]["mem_ratio"] is not None
 
 
-def test_a_refresh_after_a_hung_one_can_start():
+def worker_threads():
+    return [t for t in threading.enumerate() if t.name.startswith("status-query")]
+
+
+def test_a_refresh_is_skipped_and_counted_while_workers_of_an_earlier_one_are_stuck():
+    # Review of PR #42 (M1): without this, a server that never answers leaks a
+    # whole batch of threads per refresh, forever. Now the leak is capped at one.
     release = threading.Event()
     hang = {"on": True}
 
@@ -398,12 +411,120 @@ def test_a_refresh_after_a_hung_one_can_start():
                 release.wait(10)
             return super().__call__(promql)
 
-    service, _, _ = make_service(Hung(), refresh_timeout=0.3)
+    registry = CollectorRegistry()
+    service, fake, _ = make_service(Hung(), refresh_timeout=0.3, registry=registry)
     service.refresh_once()
+    failures = registry.get_sample_value("status_refresh_failures_total")
+    calls = len(fake.calls)
+    stuck = len(worker_threads())
+    assert stuck >= 1
+    assert service.refresh_once() is False  # skipped, not started
+    assert len(fake.calls) == calls  # nothing was sent to Prometheus
+    assert len(worker_threads()) == stuck  # and no new threads
+    assert registry.get_sample_value("status_refresh_failures_total") == failures + 1
     hang["on"] = False
-    assert service.refresh_once() is True
     release.set()
+    assert wait_for(lambda: not worker_threads())
+    assert service.refresh_once() is True  # the stuck worker finished: refreshes resume
     assert service.read()["node"]["cpu_ratio"] == 0.182
+
+
+def test_threads_never_pile_up_across_refreshes_when_every_query_hangs():
+    release = threading.Event()
+
+    class AllHung(FakePrometheus):
+        def __call__(self, promql):
+            release.wait(10)
+            return super().__call__(promql)
+
+    service, _, _ = make_service(AllHung(), refresh_timeout=0.2)
+    try:
+        for _ in range(5):
+            service.refresh_once()
+            assert len(worker_threads()) <= status.QUERY_WORKERS
+    finally:
+        release.set()
+    assert wait_for(lambda: not worker_threads())
+
+
+def test_stuck_workers_do_not_keep_the_process_alive():
+    # Review of PR #42 (M1): ThreadPoolExecutor threads are joined at interpreter
+    # exit, so one stuck query made the pod ignore SIGTERM until the kubelet
+    # killed it. Run a real interpreter with a query that never returns.
+    code = (
+        "import threading\n"
+        "from prometheus_client import CollectorRegistry\n"
+        "from app.status import StatusService\n"
+        "block = threading.Event()\n"
+        "def query(promql):\n"
+        "    block.wait()\n"
+        "service = StatusService(query, registry=CollectorRegistry(), refresh_timeout=0.2)\n"
+        "service.refresh_once()\n"
+        "print('stuck workers:',"
+        " sum(t.name.startswith('status-query') for t in threading.enumerate()))\n"
+    )
+    env = {**os.environ, "PYTHONPATH": str(BACKEND_DIR)}
+    started = time.monotonic()
+    done = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=BACKEND_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert done.returncode == 0, done.stderr
+    assert "stuck workers: " in done.stdout and "stuck workers: 0" not in done.stdout
+    assert time.monotonic() - started < 15
+
+
+def test_the_workers_are_daemon_threads():
+    release = threading.Event()
+
+    class Hung(FakePrometheus):
+        def __call__(self, promql):
+            release.wait(10)
+            return super().__call__(promql)
+
+    service, _, _ = make_service(Hung(), refresh_timeout=0.2)
+    try:
+        service.refresh_once()
+        workers = worker_threads()
+        assert workers and all(t.daemon for t in workers)
+    finally:
+        release.set()
+    assert wait_for(lambda: not worker_threads())
+
+
+@pytest.mark.parametrize("mode", ["body", "headers"])
+def test_a_real_dribbling_prometheus_leaks_no_threads_and_counts_failures(mode):
+    # End to end on real sockets (review of PR #42, M1): before the fix every
+    # refresh left a whole batch of threads stuck for good.
+    server = DripServer(mode)
+    registry = CollectorRegistry()
+    try:
+        query = status.PrometheusQuery(server.url, timeout=0.3)
+        service = StatusService(query, registry=registry, refresh_timeout=1.0)
+        for _ in range(3):
+            assert service.refresh_once() is False
+            assert len(worker_threads()) <= status.QUERY_WORKERS
+            assert wait_for(lambda: not worker_threads(), 5)  # each worker ends by itself
+        assert registry.get_sample_value("status_refresh_failures_total") == 3
+        assert service.read() is None
+    finally:
+        server.close()
+
+
+def test_a_failed_query_is_logged_with_its_fixed_message_and_a_foreign_error_by_type(caplog):
+    fake = FakePrometheus()
+    fake.answers[status.Q_NODE_CPU] = status.QueryError("prometheus response too slow")
+    fake.answers[status.Q_NODE_MEMORY] = RuntimeError("CANARY-SECRET")
+    service, _, _ = make_service(fake)
+    with caplog.at_level("WARNING", logger="app"):
+        service.refresh_once()
+    assert "prometheus response too slow" in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert "CANARY-SECRET" not in caplog.text  # only QueryError messages are known-safe
 
 
 # ---- the background thread ------------------------------------------------------
@@ -488,10 +609,24 @@ def test_an_invalid_url_turns_the_feature_off_and_logs_without_stopping_the_app(
 
 
 @pytest.mark.parametrize(
-    "value, expected", [("45", 45), ("5", 5), ("0", 30), ("-3", 30), ("abc", 30), ("1", 30)]
+    "value, expected",
+    [
+        ("45", 45),
+        ("5", 5),
+        ("300", 300),
+        ("0", 30),
+        ("-3", 30),
+        ("abc", 30),
+        ("1", 30),
+        ("301", 30),
+        ("1e9", 30),
+        ("inf", 30),
+        ("nan", 30),
+    ],
 )
-def test_the_refresh_interval_comes_from_the_env_with_a_floor(value, expected):
-    # Below 5 s would hammer Prometheus: the value is refused and the default used.
+def test_the_refresh_interval_comes_from_the_env_with_a_floor_and_a_ceiling(value, expected):
+    # Below 5 s would hammer Prometheus; above 300 s the page would show
+    # "stale" most of the time. Either way the value is refused and the default used.
     service = status.service_from_env(
         {"STATUS_PROMETHEUS_URL": "http://p.invalid:9090", "STATUS_REFRESH_SECONDS": value},
         CollectorRegistry(),
@@ -502,3 +637,42 @@ def test_the_refresh_interval_comes_from_the_env_with_a_floor(value, expected):
 def test_default_answers_cover_the_whole_allowlist():
     # Guards the fake itself: a new query without a canned answer fails here.
     assert set(default_answers()) == set(status.QUERIES)
+
+
+@pytest.mark.parametrize(
+    "interval, stale_after", [("5", 90), ("30", 90), ("45", 135), ("300", 900), ("", 90)]
+)
+def test_the_stale_threshold_follows_the_interval_but_is_never_under_90_seconds(
+    interval, stale_after
+):
+    # Review of PR #42 (L1): with a fixed 90 s and a 300 s interval the page would
+    # have called a healthy snapshot stale most of the time.
+    env = {"STATUS_PROMETHEUS_URL": "http://p.invalid:9090"}
+    if interval:
+        env["STATUS_REFRESH_SECONDS"] = interval
+    service = status.service_from_env(env, CollectorRegistry())
+    clock = Clock()
+    service._monotonic = clock  # noqa: SLF001  (the clock is not a constructor-visible knob here)
+    service._query = FakePrometheus()  # noqa: SLF001
+    service.refresh_once()
+    clock.now += stale_after
+    assert service.read()["stale"] is False
+    clock.now += 0.5
+    assert service.read()["stale"] is True
+
+
+def test_stale_after_can_still_be_given_explicitly():
+    service, _, clock = make_service(stale_after=10.0)
+    service.refresh_once()
+    clock.now += 10.5
+    assert service.read()["stale"] is True
+
+
+def test_an_unusable_interval_logs_the_allowed_range(caplog):
+    with caplog.at_level("WARNING", logger="app"):
+        status.service_from_env(
+            {"STATUS_PROMETHEUS_URL": "http://p.invalid:9090", "STATUS_REFRESH_SECONDS": "999"},
+            CollectorRegistry(),
+        )
+    assert "STATUS_REFRESH_SECONDS" in caplog.text
+    assert "300" in caplog.text

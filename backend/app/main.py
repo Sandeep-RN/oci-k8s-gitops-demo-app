@@ -252,7 +252,8 @@ def create_app(
         async def live_status() -> JSONResponse:
             snapshot = status_service.read()
             if snapshot is None:
-                return JSONResponse(NOT_YET, status_code=503, headers={"Cache-Control": "no-store"})
+                # 200, not 5xx: see NOT_YET. The page treats available=false as no data yet.
+                return JSONResponse(NOT_YET, headers={"Cache-Control": "no-store"})
             return JSONResponse(snapshot, headers={"Cache-Control": STATUS_CACHE_CONTROL})
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)

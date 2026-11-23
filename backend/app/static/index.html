@@ -188,8 +188,10 @@ a 7-day service level objective for the redirects and alerts when it burns too f
     }
     lastAsOf = typeof d.as_of === 'string' ? d.as_of : null;
     var stale = d.stale === true;
-    put('live-note', (stale ? 'Prometheus has not answered for over 90 seconds. Last update ' : 'Updated ')
-      + stamp(lastAsOf) + '. Refreshes every 30 seconds while this tab is visible.');
+    // No numbers here on purpose: the server decides how often it refreshes and
+    // when a snapshot counts as stale (STATUS_REFRESH_SECONDS), the page does not.
+    put('live-note', (stale ? 'Prometheus has not answered for a while. Last update ' : 'Updated ')
+      + stamp(lastAsOf) + '. Refreshes regularly while this tab is visible.');
     el('live-stale').hidden = !stale;
     el('live-tiles').hidden = false;
   }
@@ -215,7 +217,14 @@ a 7-day service level objective for the redirects and alerts when it burns too f
         if (!r.ok) { throw new Error('http ' + r.status); }
         return r.json();
       })
-      .then(render)
+      .then(function (data) {
+        // {"available": false}: the server is up but has no snapshot yet (it
+        // answers 200, not 5xx). Same as a failed fetch: the static line stays.
+        if (data !== null && typeof data === 'object' && data.available === false) {
+          throw new Error('not yet');
+        }
+        return render(data);
+      })
       .catch(failed)
       .then(function () { clearTimeout(cut); inflight = false; });
   }

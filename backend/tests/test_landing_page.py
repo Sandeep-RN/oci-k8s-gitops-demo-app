@@ -139,6 +139,15 @@ def test_root_has_a_live_strip_that_reads_without_javascript(client):
     assert "/api/status" in html
 
 
+def test_the_live_strip_script_treats_available_false_as_no_data_and_names_no_intervals(client):
+    # Review of PR #42 (L1, L2): the server answers 200 {"available": false} before
+    # its first refresh, and owns the refresh/stale timing, so the page has no
+    # "30 seconds" / "90 seconds" to get wrong.
+    script = client.get("/").text.split("<script>")[1].split("</script>")[0]
+    assert "available === false" in script
+    assert "90 seconds" not in script and "30 seconds" not in script
+
+
 # The example link is a row in that cluster's database, so its code is
 # configuration, not part of the image.
 def test_root_shows_the_configured_example_link():
