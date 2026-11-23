@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -21,6 +22,7 @@ from app.links import (
     TimeBoundedStore,
 )
 from app.metrics import RequestMetricsMiddleware, make_request_histogram, start_metrics_server
+from app.status import NOT_YET, StatusService, service_from_env
 
 log = logging.getLogger("app")
 
@@ -30,6 +32,9 @@ ReadinessCheck = Callable[[], bool]
 MAX_URL_LENGTH = 2048
 API_DOCS_URL = "/api/docs"
 API_OPENAPI_URL = "/api/openapi.json"
+API_STATUS_URL = "/api/status"
+# Short and public: the page polls every 30 s; a CDN or browser may reuse it.
+STATUS_CACHE_CONTROL = "public, max-age=15"
 METRICS_PORT_DEFAULT = 9000
 # Where the link-creation tokens are mounted (one file per token, ADR 0020).
 LINK_TOKENS_DIR_DEFAULT = "/etc/link-shortener/tokens"
@@ -90,6 +95,27 @@ class LinkOut(BaseModel):
     created_at: datetime
 
 
+def _with_status_refresher(
+    inner: Callable[[FastAPI], AsyncIterator[None]] | None, service: StatusService
+) -> Callable[[FastAPI], AsyncIterator[None]]:
+    """Run the status refresher thread around the caller's lifespan (if any)."""
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        service.start()
+        try:
+            if inner is None:
+                yield
+            else:
+                async with inner(app):  # type: ignore[attr-defined]
+                    yield
+        finally:
+            # join() can wait a moment for an in-flight refresh: not on the loop.
+            await asyncio.to_thread(service.stop)
+
+    return lifespan
+
+
 def create_app(
     readiness_checks: Sequence[ReadinessCheck] = (),
     store: LinkStore | None = None,
@@ -98,6 +124,7 @@ def create_app(
     tokens: TokenSource | None = None,
     create_mode: str = CREATE_MODE_TOKEN,
     example_code: str | None = None,
+    status_service: StatusService | None = None,
 ) -> FastAPI:
     _check_create_mode(create_mode)
     store = store if store is not None else InMemoryLinkStore()
@@ -107,6 +134,8 @@ def create_app(
     # /openapi.json are switched off. Old /docs needs no redirect: it is not a
     # valid 7-character code, so the /{code} route already answers a plain 404.
     # ReDoc is dropped; one docs UI is enough.
+    if status_service is not None:
+        lifespan = _with_status_refresher(lifespan, status_service)
     app = FastAPI(
         title="link-shortener",
         lifespan=lifespan,
@@ -116,6 +145,9 @@ def create_app(
     )
     # Read once: a missing file fails at startup, not on the first visit.
     landing_html = landing.render(example_code)
+    # Fails here, at startup, if the page does not have exactly one inline script
+    # to hash: a mismatch would silently break the live strip in every browser.
+    landing_headers = landing.headers(landing_html)
     # A private registry by default: metrics can only be registered once per
     # registry, and tests build many apps. Production passes the global one.
     histogram = make_request_histogram(registry if registry is not None else CollectorRegistry())
@@ -208,9 +240,24 @@ def create_app(
     def api_docs() -> HTMLResponse:
         return docs_page.swagger_page(openapi_url=API_OPENAPI_URL, title=f"{app.title} API docs")
 
+    # Live platform data (demo #230, ADR 0026). Registered only when a Prometheus
+    # URL is configured; without it the path is a plain 404 and nothing runs.
+    # Two segments, so it can never be a code. It takes no parameters at all: the
+    # snapshot is global, and nothing from the request can reach a query. It reads
+    # memory only (the refresher thread talks to Prometheus), and it is not part
+    # of /healthz or /readyz (ADR 0016).
+    if status_service is not None:
+
+        @app.get(API_STATUS_URL, summary="Live platform data (rounded aggregates)")
+        async def live_status() -> JSONResponse:
+            snapshot = status_service.read()
+            if snapshot is None:
+                return JSONResponse(NOT_YET, status_code=503, headers={"Cache-Control": "no-store"})
+            return JSONResponse(snapshot, headers={"Cache-Control": STATUS_CACHE_CONTROL})
+
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def landing_page() -> HTMLResponse:
-        return HTMLResponse(landing_html, headers=landing.HEADERS)
+        return HTMLResponse(landing_html, headers=landing_headers)
 
     # HEAD too: link checkers and `curl -I` use it. Starlette sends no body.
     # The route template stays "/{code}", which the SLO queries select on.
@@ -299,6 +346,8 @@ def create_production_app() -> FastAPI:
         create_mode=create_mode,
         # Stripped: a ConfigMap value written as a YAML block keeps a trailing newline.
         example_code=os.environ.get("EXAMPLE_LINK_CODE", "").strip(),
+        # None (feature off) unless STATUS_PROMETHEUS_URL is set and valid.
+        status_service=service_from_env(os.environ, REGISTRY),
     )
 
 

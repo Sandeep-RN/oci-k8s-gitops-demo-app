@@ -10,7 +10,14 @@ port: the app port is behind the public load balancer.
 import time
 from collections.abc import Callable
 
-from prometheus_client import REGISTRY, CollectorRegistry, Histogram, start_http_server
+from prometheus_client import (
+    REGISTRY,
+    CollectorRegistry,
+    Counter,
+    Gauge,
+    Histogram,
+    start_http_server,
+)
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 # 0.2 is the latency SLO threshold. 2.0 and 2.5 bracket the pool timeout and the
@@ -31,6 +38,26 @@ def make_request_histogram(registry: CollectorRegistry) -> Histogram:
         buckets=REQUEST_DURATION_BUCKETS,
         registry=registry,
     )
+
+
+def make_status_metrics(registry: CollectorRegistry) -> tuple[Counter, Gauge]:
+    """Metrics of the /api/status refresher (demo #230). No labels: nothing here
+    can grow the number of series. Not part of the SLO.
+
+    The age gauge is -1 until the first successful refresh; its value is set by
+    the caller (set_function), so it is always computed at scrape time.
+    """
+    failures = Counter(
+        "status_refresh_failures",
+        "Status refreshes in which at least one Prometheus query failed or timed out.",
+        registry=registry,
+    )
+    age = Gauge(
+        "status_snapshot_age_seconds",
+        "Seconds since the last status refresh that produced a snapshot (-1: none yet).",
+        registry=registry,
+    )
+    return failures, age
 
 
 class RequestMetricsMiddleware:
