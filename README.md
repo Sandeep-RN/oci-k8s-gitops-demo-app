@@ -20,7 +20,8 @@ serves a static landing page (`backend/app/static/index.html`, wired in
 | Method and path | Result |
 |---|---|
 | `POST /api/links` `{"url": "https://..."}` with `Authorization: Bearer <token>` | `201 {code, url, created_at}`; `401` with `WWW-Authenticate: Bearer` if the token is missing or unknown; `422` unless the URL is http(s) and at most 2048 characters |
-| `GET /` | The landing page: static HTML, no JavaScript, nothing loaded from elsewhere (a strict `Content-Security-Policy` enforces that), `Cache-Control: public, max-age=300`. Not part of the redirect SLO: its metric route is `/` |
+| `GET /` | The landing page: static HTML with one inline script (the live status strip), nothing loaded from elsewhere (a strict `Content-Security-Policy` allows exactly that script's hash and same-origin fetches), `Cache-Control: public, max-age=300`. Not part of the redirect SLO: its metric route is `/` |
+| `GET /api/status` | Live platform data (below): `200` with rounded aggregates and `Cache-Control: public, max-age=15`, `503 {"detail": "status not available yet"}` until a first refresh succeeds, `404` when the feature is off. Takes no parameters |
 | `GET /{code}` | `302` to the stored URL with `Cache-Control: no-store`, or `404`. No token needed |
 | `GET /api/links/{code}` | `200 {code, url, created_at}`, or `404`. No token needed |
 | `GET /healthz` | Liveness: `200` whenever the process runs. Never checks the database |
@@ -53,6 +54,21 @@ serves a static landing page (`backend/app/static/index.html`, wired in
   - `LINK_CREATE_MODE` is `token` (the default). `open` is reserved: the app
     refuses to start with it until a stricter rate limit, a destination
     allow/blocklist, link expiry and a way to disable reported links exist.
+- **Live status (`/api/status`, ADR 0026, demo issue #230)** is OFF unless
+  `STATUS_PROMETHEUS_URL` is set (for example `http://host:9090`, from the
+  ConfigMap); unset, the route does not exist (`404`) and nothing runs.
+  `STATUS_REFRESH_SECONDS` (default 30, minimum 5) sets the refresh interval.
+  A background thread asks Prometheus a fixed list of queries (constants in
+  `backend/app/status.py`, each with a 2 s timeout, 5 s for a whole refresh, answers
+  capped at 1 MiB) and keeps ONE rounded snapshot in memory; the endpoint only
+  reads it, so a Prometheus outage can make the data `stale` (after 90 s) but
+  cannot slow or fail redirects. It keeps the last good snapshot, and a field whose
+  query failed is `null` on its own. No labels, addresses or pod names are
+  returned, only aggregates and the running image's git SHA. It is not part of
+  `/healthz` or `/readyz` (ADR 0016). The landing page polls it every 30 s while
+  the tab is visible; with JavaScript off it shows "Live data unavailable".
+  Two extra metrics on the app port's registry: `status_refresh_failures_total`
+  and `status_snapshot_age_seconds` (-1 until the first success).
 - **The landing page's example link** is configuration, not code:
   `EXAMPLE_LINK_CODE` names an existing short link in that cluster's
   database, so each cluster sets its own. Unset, the page has no example

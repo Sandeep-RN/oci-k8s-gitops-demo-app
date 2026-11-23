@@ -1,10 +1,16 @@
-"""The landing page at / (demo issue #103): static HTML, built once at startup.
+"""The landing page at / (demo issue #103): HTML built once at startup.
+
+It has one inline script for the live status strip (demo #230); the CSP carries
+that script's hash.
 
 The page is not part of the redirect SLO: its metric route is "/", and the
 recording rules in the gitops repo select route="/{code}" only.
 """
 
+import base64
+import hashlib
 import logging
+import re
 from pathlib import Path
 
 from app import links
@@ -15,16 +21,37 @@ PAGE = Path(__file__).parent / "static" / "index.html"
 # Replaced by the example link's list item, or by nothing.
 EXAMPLE_MARKER = "<!--example-->"
 
-HEADERS = {
-    # Static between deploys, so caches may keep it briefly.
-    "Cache-Control": "public, max-age=300",
-    # The page has no scripts and loads nothing from elsewhere; the CSP makes
-    # that a rule the browser enforces. Inline CSS is the only thing it allows.
-    "Content-Security-Policy": (
-        "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; "
-        "form-action 'none'; frame-ancestors 'none'"
-    ),
-}
+# Exactly one inline script, with no attributes: the CSP hashes its text, and the
+# hash is only meaningful if no other script can run.
+_SCRIPT = re.compile(r"<script>(.*?)</script>", re.DOTALL)
+_ANY_SCRIPT = re.compile(r"<script\b", re.IGNORECASE)
+
+
+def headers(html: str) -> dict[str, str]:
+    """Response headers for the page, with the CSP hash of its one inline script.
+
+    Computed at startup from the HTML that is actually served, so editing the
+    script can never leave a stale hash. Raises ValueError unless the page has
+    exactly one plain <script> (no src, no attributes): fail at startup, not as
+    a silently dead strip in every browser.
+    """
+    scripts = _SCRIPT.findall(html)
+    if len(scripts) != 1 or len(_ANY_SCRIPT.findall(html)) != 1:
+        raise ValueError("the landing page must have exactly one plain inline <script>")
+    digest = base64.b64encode(hashlib.sha256(scripts[0].encode("utf-8")).digest()).decode()
+    return {
+        # Static between deploys, so caches may keep it briefly.
+        "Cache-Control": "public, max-age=300",
+        # The page loads nothing from elsewhere; the CSP makes that a rule the
+        # browser enforces. Inline CSS, the one hashed script (the live status
+        # strip, demo #230) and same-origin fetches (its /api/status poll) are
+        # all it allows. No unsafe-inline for scripts, no eval.
+        "Content-Security-Policy": (
+            "default-src 'none'; style-src 'unsafe-inline'; "
+            f"script-src 'sha256-{digest}'; connect-src 'self'; base-uri 'none'; "
+            "form-action 'none'; frame-ancestors 'none'"
+        ),
+    }
 
 
 def render(example_code: str | None) -> str:

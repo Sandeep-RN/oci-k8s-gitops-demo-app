@@ -7,10 +7,10 @@
 <title>demo.sandeeprn.in: a link shortener on Kubernetes</title>
 <style>
   :root { --bg: #fff; --fg: #1f2328; --muted: #59636e; --link: #0969da; --card: #f6f8fa;
-          --line: #d1d9e0; --accent: #0969da; --accent-bg: #ddf4ff; }
+          --line: #d1d9e0; --accent: #0969da; --accent-bg: #ddf4ff; --warn: #9a6700; }
   @media (prefers-color-scheme: dark) {
     :root { --bg: #0a0c12; --fg: #e6edf3; --muted: #9aa4b2; --link: #6cb0ff; --card: #131722;
-            --line: #2a3142; --accent: #6cb0ff; --accent-bg: #16253d; }
+            --line: #2a3142; --accent: #6cb0ff; --accent-bg: #16253d; --warn: #d4a72c; }
   }
   * { box-sizing: border-box; }
   body { font: 16px/1.55 system-ui, sans-serif; margin: 0; color: var(--fg); background: var(--bg); }
@@ -37,6 +37,18 @@
               background: var(--card); }
   .proof .n { display: block; font-size: 2rem; font-weight: 700; line-height: 1.1; }
   .proof .l { color: var(--muted); font-size: .85rem; }
+  .live { list-style: none; padding: 0; margin: .5rem 0 0; display: grid; gap: .75rem;
+          grid-template-columns: repeat(auto-fit, minmax(10.5rem, 1fr)); }
+  .live[hidden], .live li[hidden], .stale[hidden] { display: none; }
+  .live li { margin: 0; padding: .75rem 1rem; border: 1px solid var(--line); border-radius: 8px;
+             background: var(--card); }
+  .live .n { display: block; font-size: 1.6rem; font-weight: 700; line-height: 1.15;
+             overflow-wrap: anywhere; }
+  .live .n.sm { font-size: 1.05rem; line-height: 1.5; }
+  .live .l { display: block; color: var(--muted); font-size: .85rem; }
+  .live-note { color: var(--muted); font-size: .9rem; margin: .25rem 0 .75rem; }
+  .stale { color: var(--warn); border: 1px solid var(--warn); border-radius: 999px;
+           padding: 0 .5rem; font-size: .8rem; font-weight: 600; }
   .cards { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); }
   .card { padding: 1rem; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
   .card h3 { margin: 0 0 .35rem; font-size: 1rem; }
@@ -83,6 +95,152 @@ a 7-day service level objective for the redirects and alerts when it burns too f
   <li>Traefik</li><li>Argo CD</li><li>Prometheus</li><li>Terraform</li>
   <li>GitHub Actions</li><li>Sealed Secrets</li><li>cert-manager</li>
 </ul>
+
+<section id="live" aria-labelledby="live-h">
+<h2 id="live-h">Live platform data</h2>
+<p class="live-note"><span id="live-note">Live data unavailable</span>
+  <strong class="stale" id="live-stale" hidden>stale</strong></p>
+<ul class="live" id="live-tiles" hidden>
+  <li><span class="n" id="t-budget">n/a</span>
+    <span class="l">SLO error budget left, 7 days</span></li>
+  <li><span class="n" id="t-avail">n/a</span>
+    <span class="l">redirect availability, 7 days (target 99.5%)</span></li>
+  <li><span class="n" id="t-rps">n/a</span>
+    <span class="l">redirects per second, 5 min average (includes the in-cluster probe)</span></li>
+  <li><span class="n" id="t-cpu">n/a</span>
+    <span class="l">node CPU in use, 5 min average</span></li>
+  <li><span class="n" id="t-mem">n/a</span>
+    <span class="l">node memory in use, by MemAvailable (kubectl top shows a different measure)</span></li>
+  <li><span class="n" id="t-net">n/a</span>
+    <span class="l">node network transmit, all traffic</span></li>
+  <li><span class="n" id="t-pods">n/a</span>
+    <span class="l">pods running in the cluster</span></li>
+  <li><span class="n sm" id="t-since">n/a</span>
+    <span class="l">backend running since</span></li>
+  <li><span class="n sm"><a id="t-commit">n/a</a></span>
+    <span class="l">running commit (app repository)</span></li>
+  <li id="tile-argo" hidden><span class="n" id="t-argo">n/a</span>
+    <span class="l" id="t-argo-l">Argo CD apps</span></li>
+</ul>
+</section>
+<script>
+(function () {
+  'use strict';
+  // Live platform data (demo #230, ADR 0026). Progressive enhancement: without
+  // this script the page shows the static "Live data unavailable" line. Values
+  // are written with textContent only, never as HTML.
+  var STATUS_URL = '/api/status';
+  var COMMIT_URL = 'https://github.com/Sandeep-RN/oci-k8s-gitops-demo-app/commit/';
+  var POLL_MS = 30000;
+  var TIMEOUT_MS = 5000;
+  var SHA = /^[0-9a-f]{40}$/;
+  var STAMP = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/;
+  var timer = null;
+  var inflight = false;
+  var stopped = false;
+  var lastTry = 0;
+  var lastAsOf = null;
+
+  function el(id) { return document.getElementById(id); }
+  function put(id, text) { el(id).textContent = text; }
+  function obj(x) { return x !== null && typeof x === 'object' ? x : {}; }
+  function num(x) { return typeof x === 'number' && isFinite(x) ? x : null; }
+  function pct(x, digits) { x = num(x); return x === null ? 'n/a' : (x * 100).toFixed(digits) + '%'; }
+  function rate(x) { x = num(x); return x === null ? 'n/a' : (x < 1 ? x.toFixed(2) : x.toFixed(1)) + '/s'; }
+  function count(x) { x = num(x); return x === null ? 'n/a' : String(Math.round(x)); }
+  function bytes(x) {
+    x = num(x);
+    if (x === null) { return 'n/a'; }
+    if (x < 1024) { return Math.round(x) + ' B/s'; }
+    if (x < 1048576) { return (x / 1024).toFixed(1) + ' KB/s'; }
+    return (x / 1048576).toFixed(1) + ' MB/s';
+  }
+  function stamp(x) {
+    return typeof x === 'string' && STAMP.test(x) ? x.slice(0, 10) + ' ' + x.slice(11, 16) + ' UTC' : 'n/a';
+  }
+
+  function render(data) {
+    var d = obj(data);
+    var slo = obj(d.slo), traffic = obj(d.traffic), node = obj(d.node);
+    var cluster = obj(d.cluster), delivery = obj(d.delivery);
+    put('t-budget', pct(slo.error_budget_remaining, 1));
+    put('t-avail', pct(slo.availability_7d, 3));
+    put('t-rps', rate(traffic.requests_per_s_5m));
+    put('t-cpu', pct(node.cpu_ratio, 0));
+    put('t-mem', pct(node.mem_ratio, 0));
+    put('t-net', bytes(node.net_tx_bytes_per_s));
+    put('t-pods', count(cluster.pods_running));
+    put('t-since', stamp(delivery.running_since));
+    var link = el('t-commit');
+    if (typeof delivery.commit === 'string' && SHA.test(delivery.commit)) {
+      link.textContent = delivery.commit.slice(0, 7);
+      link.href = COMMIT_URL + delivery.commit;
+    } else {
+      link.textContent = 'n/a';
+      link.removeAttribute('href');
+    }
+    var argo = delivery.argocd;
+    var shown = argo !== null && typeof argo === 'object' && num(argo.apps_total) !== null;
+    el('tile-argo').hidden = !shown;
+    if (shown) {
+      put('t-argo', count(argo.synced) + '/' + count(argo.apps_total) + ' synced');
+      put('t-argo-l', 'Argo CD apps; ' + count(argo.healthy) + '/' + count(argo.apps_total) + ' healthy');
+    }
+    lastAsOf = typeof d.as_of === 'string' ? d.as_of : null;
+    var stale = d.stale === true;
+    put('live-note', (stale ? 'Prometheus has not answered for over 90 seconds. Last update ' : 'Updated ')
+      + stamp(lastAsOf) + '. Refreshes every 30 seconds while this tab is visible.');
+    el('live-stale').hidden = !stale;
+    el('live-tiles').hidden = false;
+  }
+
+  function failed() {
+    // Before the first success the static fallback text stays. After it, keep the
+    // last values on screen and say so.
+    if (lastAsOf === null) { return; }
+    put('live-note', 'Could not refresh. Showing the last values, from ' + stamp(lastAsOf) + '.');
+    el('live-stale').hidden = false;
+  }
+
+  function load() {
+    if (inflight) { return Promise.resolve(); }
+    inflight = true;
+    lastTry = Date.now();
+    var ctl = new AbortController();
+    var cut = setTimeout(function () { ctl.abort(); }, TIMEOUT_MS);
+    return fetch(STATUS_URL, { credentials: 'omit', headers: { Accept: 'application/json' }, signal: ctl.signal })
+      .then(function (r) {
+        // 404: the feature is off on this server. Stop asking.
+        if (r.status === 404) { stopped = true; throw new Error('off'); }
+        if (!r.ok) { throw new Error('http ' + r.status); }
+        return r.json();
+      })
+      .then(render)
+      .catch(failed)
+      .then(function () { clearTimeout(cut); inflight = false; });
+  }
+
+  function visible() { return document.visibilityState === 'visible'; }
+  function schedule(delay) {
+    clearTimeout(timer);
+    timer = null;
+    if (stopped || !visible()) { return; }
+    timer = setTimeout(tick, delay);
+  }
+  function tick() {
+    timer = null;
+    if (stopped || !visible()) { return; }
+    load().then(function () { schedule(POLL_MS); });
+  }
+
+  // Poll only while the tab is visible; resume when it comes back.
+  document.addEventListener('visibilitychange', function () {
+    if (visible()) { schedule(Math.max(0, POLL_MS - (Date.now() - lastTry))); }
+    else { clearTimeout(timer); timer = null; }
+  });
+  schedule(0);
+}());
+</script>
 
 <h2>Try it</h2>
 <ul>
