@@ -35,7 +35,8 @@ EXPECTED = (
     ("latency", "slo:redirect_latency_good:ratio_rate7d", 7 * 86400, 1800),
     ("rps", "slo:redirect_requests:rate5m", 86400, 300),
     ("cpu", '1-avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))', 86400, 300),
-    ("mem", "1-node_memory_MemAvailable_bytes/node_memory_MemTotal_bytes", 86400, 300),
+    # aggregated: two node-exporter series (a pod replaced) must not blank the chart (review M2)
+    ("mem", "avg(1-node_memory_MemAvailable_bytes/node_memory_MemTotal_bytes)", 86400, 300),
     (
         "net",
         'sum(rate(node_network_transmit_bytes_total{device!~"lo|veth.*|cni.*|flannel.*"}[5m]))',
@@ -94,7 +95,20 @@ def test_no_query_has_an_ad_hoc_range_selector_longer_than_one_hour():
 
 def test_the_allowlist_shares_its_promql_with_the_instant_queries_where_it_can():
     shared = {q for _, q, _, _ in history.RANGE_QUERIES} & set(status.QUERIES)
-    assert len(shared) == 9  # every range query is one the strip already runs
+    # Eight of nine: the memory chart wraps the strip's query in avg() (review M2).
+    assert len(shared) == 8
+    assert status.Q_NODE_MEMORY in history.Q_NODE_MEMORY_RANGE
+
+
+def test_every_single_line_chart_query_is_aggregated_or_a_recording_rule():
+    # Two series (a replaced exporter pod, a second node) must never be possible for a
+    # single-line chart: that chart would read "no data" until the old series aged out.
+    for key, promql, _, _ in history.RANGE_QUERIES:
+        if key == "deploys":
+            continue  # one series per pod on purpose
+        assert re.match(r"^(1-)?(avg|sum|max|min|count)\(", promql) or re.fullmatch(
+            r"slo:[a-z0-9_:]+", promql
+        ), f"{key}: {promql} is not aggregated"
 
 
 def test_a_refresh_sends_exactly_the_allowlist_with_windows_from_the_server_clock():
@@ -199,6 +213,10 @@ def test_points_off_the_grid_or_outside_it_are_ignored():
         ("net", -1.0, 0.0),
         ("pods", -2.0, 0.0),
         ("pods", 1e12, 1e6),
+        # subnormals and noise are zero, not a number that breaks arithmetic (review M1)
+        ("rps", 5e-324, 0.0),
+        ("net", 1e-320, 0.0),
+        ("rps", -5e-324, 0.0),
     ],
 )
 def test_values_are_clamped_to_what_the_metric_can_mean(key, raw, expected):
@@ -395,8 +413,14 @@ def test_an_empty_deploy_answer_is_no_markers_not_a_failure():
 def test_the_markers_are_capped_and_the_newest_are_kept():
     answers = default_range_answers(WALL)
     start, _, step = grid("deploys", WALL)
+
+    # Tags that differ in their FIRST 7 characters: the old test's tags shared them all,
+    # so it could not tell which markers were kept (review L1).
+    def tag(i):
+        return f"{i:07x}" + "0" * 33
+
     many = [
-        RangeSeries(labels={"image": image(f"{i:040x}")}, points=((start + (i + 1) * step, 1.0),))
+        RangeSeries(labels={"image": image(tag(i))}, points=((start + (i + 1) * step, 1.0),))
         for i in range(1, 80)
     ]
     answers[spec("deploys")[1]] = many
@@ -404,8 +428,50 @@ def test_the_markers_are_capped_and_the_newest_are_kept():
     service.refresh_once()
     marks = deploys_of(service)
     assert len(marks) == history.MAX_DEPLOY_MARKS
-    assert marks[-1].short == f"{79:040x}"[:7]
-    assert [m.ts for m in marks] == sorted(m.ts for m in marks)
+    # i=1 is the tag at the first sample (not a deploy); the newest 32 are i=48..79.
+    assert [m.short for m in marks] == [f"{i:07x}" for i in range(48, 80)]
+    assert [m.ts for m in marks] == [start + (i + 1) * step for i in range(48, 80)]
+
+
+def test_a_rollback_gets_a_marker_a_to_b_to_a_is_two_transitions():
+    # Review L4: first-seen-ever gave A -> B -> A one marker (B) and none for the way back.
+    start, _, step = grid("deploys", WALL)
+
+    def run(sha, a, b):
+        return RangeSeries(
+            labels={"image": image(sha)}, points=tuple((start + i * step, 1.0) for i in range(a, b))
+        )
+
+    answers = default_range_answers(WALL)
+    answers[spec("deploys")[1]] = [run(SHA_A, 0, 10), run(SHA_B, 10, 20), run(SHA_A, 20, 30)]
+    service, _, _ = make(FakeRange(answers))
+    service.refresh_once()
+    marks = deploys_of(service)
+    # three appearances minus the one at the first sample
+    assert [(m.short, m.ts) for m in marks] == [
+        (SHA_B[:7], start + 10 * step),
+        (SHA_A[:7], start + 20 * step),
+    ]
+
+
+def test_a_rolling_update_and_a_missed_scrape_make_no_extra_markers():
+    start, _, step = grid("deploys", WALL)
+
+    def pod(sha, idx):
+        return RangeSeries(
+            labels={"image": image(sha)}, points=tuple((start + i * step, 1.0) for i in idx)
+        )
+
+    answers = default_range_answers(WALL)
+    # A: two pods, one misses a scrape at step 5. B arrives at 10 while A still runs.
+    answers[spec("deploys")[1]] = [
+        pod(SHA_A, [i for i in range(0, 12) if i != 5]),
+        pod(SHA_A, range(0, 11)),
+        pod(SHA_B, range(10, 20)),
+    ]
+    service, _, _ = make(FakeRange(answers))
+    service.refresh_once()
+    assert [(m.short, m.ts) for m in deploys_of(service)] == [(SHA_B[:7], start + 10 * step)]
 
 
 # ---- never overlap, never pile up ------------------------------------------------------
@@ -414,8 +480,10 @@ def test_the_markers_are_capped_and_the_newest_are_kept():
 def test_a_refresh_is_skipped_and_counted_while_a_worker_of_the_previous_one_is_alive():
     release, started = threading.Event(), threading.Event()
     inner = FakeRange()
+    entered = []  # calls of stuck() itself: a second worker would add to this
 
     def stuck(promql, start, end, step):
+        entered.append(promql)
         if promql == spec("budget")[1]:
             started.set()
             release.wait(10)
@@ -426,9 +494,11 @@ def test_a_refresh_is_skipped_and_counted_while_a_worker_of_the_previous_one_is_
         assert service.refresh_once() is False  # the first one runs into its deadline
         assert started.is_set()
         assert registry.get_sample_value("status_history_refresh_failures_total") == 1
-        calls = len(inner.calls)
+        calls, threads = len(entered), threading.active_count()
         assert service.refresh_once() is False  # skipped: the worker is still alive
-        assert len(inner.calls) == calls  # and nothing new was asked
+        # Asserted on stuck() itself: without the guard a second worker would call it
+        # (and block in it), so this fails when the guard is removed (review L2).
+        assert len(entered) == calls and threading.active_count() == threads
         assert registry.get_sample_value("status_history_refresh_failures_total") == 2
     finally:
         release.set()

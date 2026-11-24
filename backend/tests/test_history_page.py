@@ -427,6 +427,7 @@ def check_svg(svg):
 
 def random_values(rng, n):
     kinds = [None, None, math.nan, math.inf, -math.inf, 0.0, -1.0, 1e300, -1e300, 1e-300]
+    kinds += [1e-320, 5e-324, -5e-324]  # subnormals: review M1
     out = []
     for _ in range(n):
         r = rng.random()
@@ -489,9 +490,11 @@ def test_the_checker_itself_notices_a_forbidden_tag_or_attribute():
 
 
 def test_a_flat_series_and_a_single_value_do_not_divide_by_zero():
+    order = [s.key for s in history_page.ALL_CHARTS]
     for key in ("cpu", "pods", "budget"):
         snap = full_snapshot_of(**{key: series_data(key, [0.5] * 50)})
-        check_svg(svg_parts(render(snap))[0])
+        # The chart under test, by its place on the page (index 0 is always the budget).
+        check_svg(svg_parts(render(snap))[order.index(key)])
     snap = full_snapshot_of(cpu=series_data("cpu", [0.0] * 50))
     render(snap)
 
@@ -509,3 +512,108 @@ def test_deploys_minutes_apart_do_not_paint_a_solid_bar_but_the_list_keeps_them_
     page = render(full_snapshot_of(deploys=DeploysData(start, end, marks, NOW + 123.0)))
     assert 1 <= len(ticks_in(page, "budget")) < 30
     assert page.count("<li>") == 30
+
+
+# ---- review of PR #45 (demo #235): M1, L3, L5 -------------------------------------------
+
+
+@pytest.mark.parametrize("tiny", [5e-324, 1e-320, 1e-310, 1e-300, 1e-12])
+def test_a_subnormal_or_tiny_value_does_not_blank_any_chart(tiny):
+    # 10.0 ** floor(log10(5e-324)) underflows to 0.0: x / 0.0 raised ZeroDivisionError
+    # and one such point blanked all eight charts on every refresh.
+    # every point tiny: the axis top is then derived from the subnormal itself
+    charts = {k: series_data(k, [tiny] * 20) for k in ("rps", "net", "pods")}
+    page = render(full_snapshot_of(**charts))
+    for key in charts:
+        section = re.search(rf'id="chart-{key}".*?</section>', page, re.S).group(0)
+        assert "no data" not in section, key
+    assert page.count('<path class="line"') == 8
+
+
+@pytest.mark.parametrize("x", [5e-324, 1e-320, 1e-12, 1e-9, 0.0, -1.0, math.nan, math.inf])
+def test_nice_top_is_always_a_positive_finite_number(x):
+    top = history_page._nice_top(x)  # noqa: SLF001
+    assert math.isfinite(top) and top > 0
+
+
+def test_a_chart_that_raises_shows_no_data_and_the_others_are_untouched(monkeypatch, caplog):
+    real = history_page._axis  # noqa: SLF001
+
+    def broken(spec_, shown):
+        if spec_.key == "cpu":
+            raise ZeroDivisionError("secret detail that must not be logged")
+        return real(spec_, shown)
+
+    monkeypatch.setattr(history_page, "_axis", broken)
+    errors: list[str] = []
+    page = history_page.render_page(snapshot_from(), errors=errors)
+    cpu = re.search(r'id="chart-cpu".*?</section>', page, re.S).group(0)
+    assert "no data" in cpu
+    assert page.count('<path class="line"') == 7  # the other seven are drawn
+    assert errors == ["cpu"]
+    assert "ZeroDivisionError" in caplog.text and "secret detail" not in caplog.text
+
+
+def test_a_service_counts_a_chart_that_cannot_be_drawn_once_and_still_publishes(monkeypatch):
+    real = history_page._axis  # noqa: SLF001
+
+    def broken(spec_, shown):
+        if spec_.key == "mem":
+            raise ValueError("boom")
+        return real(spec_, shown)
+
+    monkeypatch.setattr(history_page, "_axis", broken)
+    registry = CollectorRegistry()
+    service = HistoryService(
+        FakeRange(default_range_answers(NOW + 123.0)), registry=registry, wall=lambda: NOW + 123.0
+    )
+    assert service.refresh_once() is True
+    # fresh and stale are two renders of one snapshot: one failure, not two
+    assert registry.get_sample_value("status_history_refresh_failures_total") == 1
+    assert service.page().count('<path class="line"') == 7
+
+
+def test_hostile_text_in_a_marker_is_escaped_in_the_chart_and_the_list():
+    # Unreachable from Prometheus (history.py only lets 7 hex characters through), so
+    # this pins the last line of defence: html.escape with quote=True.
+    start, end, _ = grid("deploys")
+    hostile = Deploy(ts=end - 3600, short='<b x="1">')
+    data = series_data("cpu", [0.2] * 200)
+    section = history_page._chart(  # noqa: SLF001
+        history_page.NODE_CHARTS[1], data, (hostile,), data.as_of
+    )
+    listing = history_page._deploys_section(  # noqa: SLF001
+        DeploysData(start, end, (hostile,), NOW)
+    )
+    for out in (section, listing):
+        assert "&lt;b x=&quot;1&quot;&gt;" in out
+        assert "<b x" not in out and '"1"' not in out.replace("&quot;1&quot;", "")
+
+
+def test_n_clamps_and_blanks_what_is_not_a_finite_number():
+    # Every caller already clamps, so the clamp cannot be reached through a page:
+    # it is kept as a last line of defence and pinned here directly.
+    assert history_page._n(1e9) == "100000.0"  # noqa: SLF001
+    assert history_page._n(-1e9) == "-100000.0"  # noqa: SLF001
+    assert history_page._n(math.nan) == "0.0"  # noqa: SLF001
+    assert history_page._n("x") == "0.0"  # type: ignore[arg-type]  # noqa: SLF001
+
+
+def test_a_single_recent_point_says_less_than_a_tenth_of_a_day_not_zero():
+    snap = full_snapshot_of(budget=series_data("budget", [None] * 300 + [0.9]))
+    section = re.search(r'id="chart-budget".*?</section>', render(snap), re.S).group(0)
+    assert "has less than 0.1 of 7 days of data" in section
+    assert "has 0 of" not in section
+
+
+def test_the_amount_of_data_counts_points_not_the_first_to_last_span():
+    start, end, step = grid("budget")
+    n = int((end - start) // step) + 1
+    values = [None] * n
+    values[0], values[-1] = 0.9, 0.9  # two points a whole week apart
+    section = re.search(
+        r'id="chart-budget".*?</section>',
+        render(full_snapshot_of(budget=series_data("budget", values))),
+        re.S,
+    ).group(0)
+    assert "has less than 0.1 of 7 days of data" in section

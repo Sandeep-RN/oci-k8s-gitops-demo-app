@@ -39,6 +39,11 @@ log = logging.getLogger("app")
 DAY = 86400
 
 # ---- the allowlist (ADR 0027) ---------------------------------------------------------
+# The memory chart wraps the strip's query in avg(): after a node-exporter pod is
+# replaced Prometheus holds two series for a day, and a single-line chart refuses two
+# (a merge would invent a number), so the chart would read "no data" for 24 h.
+Q_NODE_MEMORY_RANGE = f"avg({status.Q_NODE_MEMORY})"
+
 # (key, PromQL, window seconds, step seconds). The ONLY range queries this app ever
 # sends, all constants, and no ad hoc range selector is longer than [5m]: the 7-day
 # charts read RECORDING RULES (an ad hoc rate(...[7d]) over 7 days would be costly).
@@ -49,7 +54,7 @@ RANGE_QUERIES: tuple[tuple[str, str, int, int], ...] = (
     ("latency", status.Q_LATENCY_GOOD, 7 * DAY, 1800),
     ("rps", status.Q_REQUEST_RATE, DAY, 300),
     ("cpu", status.Q_NODE_CPU, DAY, 300),
-    ("mem", status.Q_NODE_MEMORY, DAY, 300),
+    ("mem", Q_NODE_MEMORY_RANGE, DAY, 300),
     ("net", status.Q_NODE_NET_TX, DAY, 300),
     ("pods", status.Q_PODS_RUNNING, DAY, 300),
     # One series per backend pod; the image label's tag is the commit. 7 days at
@@ -79,6 +84,9 @@ MAX_REFRESH_SECONDS = 900.0
 HISTORY_REFRESH_TIMEOUT = 25.0
 MAX_DEPLOY_MARKS = 32  # the newest; a chart with more ticks is unreadable anyway
 GRID_TOLERANCE = 1.0  # seconds; a point further than this from a step is not ours
+# |value| below this is drawn as 0: subnormals (5e-324) are noise, and they break
+# arithmetic further down (review M1).
+NOISE_FLOOR = 1e-12
 
 
 # ---- the snapshot ---------------------------------------------------------------------
@@ -119,20 +127,21 @@ def _series_data(
                 continue
             index = int(round((ts - start) / step))
             if 0 <= index < len(values) and abs(ts - (start + index * step)) <= GRID_TOLERANCE:
+                value = 0.0 if abs(value) < NOISE_FLOOR else value
                 values[index] = max(low, min(high, value))
     return SeriesData(start, end, step, tuple(values), as_of)
 
 
 def _deploys_data(answer: Any, start: float, end: float, as_of: float) -> DeploysData:
-    """Markers: the first time each distinct commit tag shows up in the window.
+    """Markers: every time a commit tag shows up that was absent at the sample before.
 
-    A tag that is already there at the first sample was running before the data
-    begins, so it is not a deploy and gets no marker. Only a full lowercase git SHA
-    in the image's tag counts; anything else is ignored (never shown)."""
+    A rollback A -> B -> A is two markers (B, then A again): first-seen-ever would
+    miss the way back (review L4). A tag that is already there at the first sample was
+    running before the data begins, so it is not a deploy and gets no marker. Only a
+    full lowercase git SHA in the image's tag counts; anything else is ignored."""
     if not isinstance(answer, list) or not all(isinstance(s, RangeSeries) for s in answer):
         raise _Unusable("not a list of series")
-    first: dict[str, float] = {}
-    earliest = math.inf
+    present: dict[float, set[str]] = {}  # sample time -> tags running then
     for s in answer:
         labels = s.labels if isinstance(s.labels, Mapping) else {}
         tag = status._tag(labels.get("image"))  # noqa: SLF001  (the 40-hex check lives there)
@@ -140,12 +149,14 @@ def _deploys_data(answer: Any, start: float, end: float, as_of: float) -> Deploy
             continue
         for ts, _ in s.points:
             if math.isfinite(ts) and start <= ts <= end:
-                earliest = min(earliest, ts)
-                first[tag] = min(first.get(tag, math.inf), ts)
-    marks = sorted(
-        (Deploy(ts=ts, short=tag[:7]) for tag, ts in first.items() if ts > earliest),
-        key=lambda m: m.ts,
-    )
+                present.setdefault(ts, set()).add(tag)
+    marks: list[Deploy] = []
+    previous: set[str] | None = None  # None at the first sample: all of those are "before"
+    for ts in sorted(present):
+        if previous is not None:
+            # Sorted tags: two tags new at the same sample get a stable order.
+            marks.extend(Deploy(ts=ts, short=tag[:7]) for tag in sorted(present[ts] - previous))
+        previous = present[ts]
     return DeploysData(start, end, tuple(marks[-MAX_DEPLOY_MARKS:]), as_of)
 
 
@@ -287,9 +298,11 @@ class HistoryService:
             self._failures.inc()
             return False  # nothing answered: keep the last good snapshot
         snapshot = HistorySnapshot(as_of=wall, charts=charts)
+        chart_errors: list[str] = []
         try:
+            # Only this render is counted: the stale copy would fail the same charts.
             fresh = history_page.render_page(
-                snapshot, stale=False, refresh_seconds=self.refresh_seconds
+                snapshot, stale=False, refresh_seconds=self.refresh_seconds, errors=chart_errors
             )
             stale = history_page.render_page(
                 snapshot, stale=True, refresh_seconds=self.refresh_seconds
@@ -299,8 +312,8 @@ class HistoryService:
             log.exception("history page could not be rendered")
             self._failures.inc()
             return False
-        if failed:
-            self._failures.inc()
+        if failed or chart_errors:
+            self._failures.inc()  # once per refresh, whatever the number of bad charts
         self._current = _Current(snapshot, fresh, stale, self._monotonic())
         return True
 
