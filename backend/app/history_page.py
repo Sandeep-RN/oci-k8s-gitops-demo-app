@@ -15,12 +15,15 @@ A gap in a series is a gap in the line, never a zero.
 """
 
 import html
+import logging
 import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from app.history_model import Deploy, DeploysData, HistorySnapshot, SeriesData
 from app.status import SLO_TARGET_PERCENT
+
+log = logging.getLogger("app")
 
 # Exactly the CSP of the strictest page on the site: no script of any kind.
 CSP = (
@@ -182,9 +185,13 @@ def _step_digits(step: float) -> int:
 
 
 def _nice_top(x: float) -> float:
-    if not (math.isfinite(x) and x > 0):
+    # 1e-9: below it the axis would be all zeros anyway, and a subnormal such as 5e-324
+    # makes 10.0 ** floor(log10(x)) underflow to 0.0 (review M1).
+    if not (math.isfinite(x) and x > 1e-9):
         return 1.0
     base = 10.0 ** math.floor(math.log10(x))
+    if not base > 0:  # belt and braces: never divide by an underflowed power of ten
+        return 1.0
     m = x / base
     for c in _NICE:
         if m <= c + 1e-9:
@@ -397,15 +404,14 @@ def _chart(
     if spec.key == "rps":
         notes.append("This includes the in-cluster probe.")
     if has_data:
-        first_i = min(i for i, v in enumerate(raw) if v is not None)
-        last_i = max(i for i, v in enumerate(raw) if v is not None)
-        have = (last_i - first_i + 1) * step
+        have = len(present) * step  # points present, not the first-to-last span (review L5)
         if have < window - 2 * step:
             if window >= 2 * 86400:
                 have_t, want_t, unit = have / 86400, window / 86400, "days"
             else:
                 have_t, want_t, unit = have / 3600, window / 3600, "hours"
-            notes.append(f"This chart has {_trim(have_t)} of {_trim(want_t)} {unit} of data.")
+            have_text = "less than 0.1" if _trim(have_t) == "0" else _trim(have_t)
+            notes.append(f"This chart has {have_text} of {_trim(want_t)} {unit} of data.")
     if ok and snapshot_as_of - data.as_of > STALE_CHART_SECONDS:
         notes.append(
             f"Last updated {_stamp(data.as_of)}: the newest refresh could not update this chart."
@@ -602,14 +608,37 @@ def _deploys_section(data: object) -> str:
     return head + f'<ul class="deploys">\n{items}</ul>\n'
 
 
-def render_page(
-    snapshot: HistorySnapshot, *, stale: bool = False, refresh_seconds: float = 300.0
+def _safe_chart(
+    spec: _Spec,
+    snapshot: HistorySnapshot,
+    marks: tuple[Deploy, ...] | None,
+    errors: list[str] | None,
 ) -> str:
+    """One chart, isolated: a bug while drawing it blanks that chart only (review M1).
+    Only the exception TYPE is logged: its message could carry the data."""
+    try:
+        return _chart(spec, snapshot.charts.get(spec.key), marks, snapshot.as_of)
+    except Exception as exc:
+        log.warning("history chart %s could not be drawn: %s", spec.key, type(exc).__name__)
+        if errors is not None:
+            errors.append(spec.key)
+        return _chart(spec, None, None, snapshot.as_of)  # constants only: "no data"
+
+
+def render_page(
+    snapshot: HistorySnapshot,
+    *,
+    stale: bool = False,
+    refresh_seconds: float = 300.0,
+    errors: list[str] | None = None,
+) -> str:
+    """The page. A chart that cannot be drawn shows "no data" and the others are
+    untouched; its key is appended to `errors` (if given) so the caller can count it."""
     deploys = snapshot.charts.get("deploys")
     marks = deploys.marks if isinstance(deploys, DeploysData) else None
 
     def group(specs: tuple[_Spec, ...]) -> str:
-        cells = "".join(_chart(s, snapshot.charts.get(s.key), marks, snapshot.as_of) for s in specs)
+        cells = "".join(_safe_chart(s, snapshot, marks, errors) for s in specs)
         return f'<div class="charts">\n{cells}</div>\n'
 
     banner = (

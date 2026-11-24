@@ -299,3 +299,38 @@ def test_the_nav_of_the_landing_page_does_not_link_to_the_page_unconditionally()
     # Off means 404: a static link would point at it.
     html = TestClient(create_app()).get("/").text
     assert 'href="/status"' not in html
+
+
+def test_every_refresher_is_stopped_even_when_a_later_one_fails_to_start():
+    # Review INFO: the start loop used to sit outside the try, so a second start() that
+    # raised left the first thread running with nothing to stop it.
+    import asyncio
+
+    from app.main import _with_status_refresher
+
+    class Fake:
+        def __init__(self, fail=False):
+            self.fail, self.started, self.stopped = fail, False, 0
+
+        def start(self):
+            if self.fail:
+                raise RuntimeError("cannot start")
+            self.started = True
+
+        def stop(self):
+            self.stopped += 1
+
+    first, second = Fake(), Fake(fail=True)
+    lifespan = _with_status_refresher(None, [first, second])
+
+    async def run():
+        async with lifespan(None):
+            raise AssertionError("must not get here")
+
+    try:
+        asyncio.run(run())
+    except RuntimeError as exc:
+        assert str(exc) == "cannot start"
+    else:
+        raise AssertionError("the start failure must propagate")
+    assert first.started and first.stopped == 1 and second.stopped == 1

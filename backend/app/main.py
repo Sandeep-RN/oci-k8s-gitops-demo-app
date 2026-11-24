@@ -110,9 +110,10 @@ def _with_status_refresher(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        for s in services:
-            s.start()
         try:
+            # Inside the try: if the second start() raises, the first thread is stopped.
+            for s in services:
+                s.start()
             if inner is None:
                 yield
             else:
