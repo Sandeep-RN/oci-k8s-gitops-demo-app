@@ -39,10 +39,11 @@ log = logging.getLogger("app")
 DAY = 86400
 
 # ---- the allowlist (ADR 0027) ---------------------------------------------------------
-# The memory chart wraps the strip's query in avg(): after a node-exporter pod is
-# replaced Prometheus holds two series for a day, and a single-line chart refuses two
-# (a merge would invent a number), so the chart would read "no data" for 24 h.
-Q_NODE_MEMORY_RANGE = f"avg({status.Q_NODE_MEMORY})"
+# The memory query is aggregated with avg() in status.py, for the strip and the chart
+# alike: after a node-exporter pod is replaced Prometheus holds two series for a day,
+# and a single-line chart refuses two (a merge would invent a number), so the chart
+# would read "no data" for 24 h.
+Q_NODE_MEMORY_RANGE = status.Q_NODE_MEMORY
 
 # (key, PromQL, window seconds, step seconds). The ONLY range queries this app ever
 # sends, all constants, and no ad hoc range selector is longer than [5m]: the 7-day

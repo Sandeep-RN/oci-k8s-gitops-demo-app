@@ -45,7 +45,10 @@ Q_LATENCY_GOOD = "slo:redirect_latency_good:ratio_rate7d"
 Q_REQUEST_RATE = "slo:redirect_requests:rate5m"
 Q_NODE_CPU = '1-avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))'
 # "By MemAvailable": `kubectl top` uses another measure and shows a higher number.
-Q_NODE_MEMORY = "1-node_memory_MemAvailable_bytes/node_memory_MemTotal_bytes"
+# Wrapped in avg(): after a node-exporter pod is replaced Prometheus holds two series
+# for a day, and the first one listed is not a stable choice. The history chart
+# sends this same string.
+Q_NODE_MEMORY = "avg(1-node_memory_MemAvailable_bytes/node_memory_MemTotal_bytes)"
 # Transmit only, all traffic. Receive is deliberately absent: on 2026-11-23 it
 # was almost entirely image pulls, not visitors.
 Q_NODE_NET_TX = (
@@ -123,6 +126,14 @@ _YEAR_2100 = 4_102_444_800
 
 class QueryError(Exception):
     """Prometheus could not be asked, or its answer was unusable."""
+
+
+@dataclass(frozen=True)
+class _Failure:
+    """What is kept of a failed query: a fixed message or an exception TYPE NAME,
+    never the exception object (see the worker in StatusService._refresh)."""
+
+    text: str
 
 
 @dataclass(frozen=True)
@@ -669,8 +680,14 @@ class StatusService:
                     return
                 try:
                     outcomes[q] = self._query(q)
+                except QueryError as exc:
+                    # Never keep the exception itself: its traceback keeps the frame
+                    # of the parser, which holds the parsed body (28 MiB at the peak
+                    # in the history code, PR #45). A QueryError message is a fixed
+                    # string; anything else is kept as its type name only.
+                    outcomes[q] = _Failure(str(exc))
                 except Exception as exc:
-                    outcomes[q] = exc
+                    outcomes[q] = _Failure(type(exc).__name__)
 
         self._workers = [
             threading.Thread(target=work, name=f"status-query-{i}", daemon=True)
@@ -689,12 +706,10 @@ class StatusService:
                 failed += 1
                 continue
             value = outcomes[q]
-            if isinstance(value, QueryError):
-                # Every QueryError message is a fixed string (no label or body text).
-                log.warning("status query failed: %s", value)
-                failed += 1
-            elif isinstance(value, Exception):
-                log.warning("status query failed: %s", type(value).__name__)
+            if isinstance(value, _Failure):
+                # Either a fixed QueryError message (no label or body text) or the
+                # type name of a foreign exception: both are safe to log.
+                log.warning("status query failed: %s", value.text)
                 failed += 1
             elif isinstance(value, list):
                 results[q] = value

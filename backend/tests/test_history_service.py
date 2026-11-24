@@ -95,9 +95,9 @@ def test_no_query_has_an_ad_hoc_range_selector_longer_than_one_hour():
 
 def test_the_allowlist_shares_its_promql_with_the_instant_queries_where_it_can():
     shared = {q for _, q, _, _ in history.RANGE_QUERIES} & set(status.QUERIES)
-    # Eight of nine: the memory chart wraps the strip's query in avg() (review M2).
-    assert len(shared) == 8
-    assert status.Q_NODE_MEMORY in history.Q_NODE_MEMORY_RANGE
+    # All nine: the memory query is aggregated for both (one constant, review M2).
+    assert len(shared) == 9
+    assert history.Q_NODE_MEMORY_RANGE == status.Q_NODE_MEMORY
 
 
 def test_every_single_line_chart_query_is_aggregated_or_a_recording_rule():
