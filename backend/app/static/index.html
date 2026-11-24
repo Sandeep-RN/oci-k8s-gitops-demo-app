@@ -99,7 +99,8 @@ a 7-day service level objective for the redirects and alerts when it burns too f
 <section id="live" aria-labelledby="live-h">
 <h2 id="live-h">Live platform data</h2>
 <p class="live-note"><span id="live-note">Live data unavailable</span>
-  <strong class="stale" id="live-stale" hidden>stale</strong></p>
+  <strong class="stale" id="live-stale" hidden>stale</strong>
+  <a id="t-history" hidden></a></p>
 <ul class="live" id="live-tiles" hidden>
   <li><span class="n" id="t-budget">n/a</span>
     <span class="l">SLO error budget left, 7 days</span></li>
@@ -131,6 +132,7 @@ a 7-day service level objective for the redirects and alerts when it burns too f
   // are written with textContent only, never as HTML.
   var STATUS_URL = '/api/status';
   var COMMIT_URL = 'https://github.com/Sandeep-RN/oci-k8s-gitops-demo-app/commit/';
+  var HISTORY_URL = '/status';
   var POLL_MS = 30000;
   var TIMEOUT_MS = 5000;
   var SHA = /^[0-9a-f]{40}$/;
@@ -185,6 +187,17 @@ a 7-day service level objective for the redirects and alerts when it burns too f
     if (shown) {
       put('t-argo', count(argo.synced) + '/' + count(argo.apps_total) + ' synced');
       put('t-argo-l', 'Argo CD apps; ' + count(argo.healthy) + '/' + count(argo.apps_total) + ' healthy');
+    }
+    // History charts (demo #235): the server says whether /status exists, so the
+    // link never points at a 404. Constants only; nothing from the data is written.
+    var hist = el('t-history');
+    if (d.history === true) {
+      hist.textContent = 'History charts';
+      hist.href = HISTORY_URL;
+      hist.hidden = false;
+    } else {
+      hist.hidden = true;
+      hist.removeAttribute('href');
     }
     lastAsOf = typeof d.as_of === 'string' ? d.as_of : null;
     var stale = d.stale === true;

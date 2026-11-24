@@ -89,6 +89,21 @@ WATCHDOG_GRACE = 0.5
 # the worst case in single-digit MiB (it was 126 MiB at 1 MiB x 6).
 MAX_RESPONSE_BYTES = 64 * 1024
 MAX_SERIES = 1000  # one answer; the biggest real one has a handful
+# ---- range answers (demo #235, ADR 0027) ---------------------------------------------
+# Measured on 2026-11-24: 3.5 KB (7 days at 30 min), 10.5 KB (24 h at 5 min) and
+# 24.8 KB (16 series of backend image tags, 744 points). 128 KiB leaves 5x room for
+# the biggest, and the worst case stays in single-digit MiB (see the PR's numbers).
+MAX_RANGE_RESPONSE_BYTES = 128 * 1024
+MAX_RANGE_SERIES = 64  # the deploy answer has about 16; one chart line has 1
+# A series may hold the points its window and step allow, plus this margin
+# (Prometheus includes both ends; a clock a little ahead adds one more).
+RANGE_POINT_MARGIN = 2
+# Total points over all series, as a multiple of the per-series allowance. A real
+# answer is ONE series, except the deploy chart: one series per pod, and at most
+# three pods (two replicas plus a surge) are alive at once, so its total is about
+# 3x. 4x covers that and refuses a server that sends 64 full series.
+RANGE_TOTAL_FACTOR = 4
+MAX_RANGE_STEPS = 11_000  # Prometheus itself refuses more points than this per series
 MAX_LABEL_VALUE = 512
 MAX_LABELS = 32
 QUERY_WORKERS = 3  # 11 queries; normal answers take milliseconds
@@ -116,6 +131,16 @@ class Sample:
 
     labels: Mapping[str, Any]
     value: Any
+
+
+@dataclass(frozen=True)
+class RangeSeries:
+    """One series of a range matrix: (timestamp, value) pairs, finite numbers only,
+    sorted, unique and inside the asked window. Labels are used to read, never to
+    publish."""
+
+    labels: Mapping[str, Any]
+    points: tuple[tuple[float, float], ...]
 
 
 Query = Callable[[str], list[Sample]]
@@ -215,6 +240,7 @@ class PrometheusQuery:
         opener: Any = None,
     ) -> None:
         self._endpoint = _endpoint(base_url)
+        self._range_endpoint = f"{self._endpoint}_range"
         self._timeout = timeout
         # No proxies from the environment (HTTP_PROXY would divert the call),
         # no redirects, and connections the watchdog can cut off.
@@ -237,13 +263,48 @@ class PrometheusQuery:
             raise QueryError(f"prometheus request failed: {type(exc).__name__}") from exc
         return _parse_vector(body)
 
-    def _fetch(self, request: urllib.request.Request) -> bytes:
+    def query_range(
+        self,
+        promql: str,
+        start: float,
+        end: float,
+        step: float,
+        *,
+        max_series: int = MAX_RANGE_SERIES,
+    ) -> list[RangeSeries]:
+        """A range query with the same hardening as the instant query (watchdog,
+        read1 loop, total deadline, no redirects, no proxies, strict numbers) and a
+        128 KiB answer cap. start, end and step come from the server's clock and
+        constants, never from a request; nonsense is a ValueError (a bug here)."""
+        numbers = (start, end, step)
+        if not all(isinstance(n, int | float) and math.isfinite(n) for n in numbers):
+            raise ValueError("start, end and step must be finite numbers")
+        if not (0 < step and start < end and (end - start) / step <= MAX_RANGE_STEPS):
+            raise ValueError("the range must be non-empty and have at most 11000 steps")
+        params = {
+            "query": promql,
+            "start": f"{start:.0f}",
+            "end": f"{end:.0f}",
+            "step": f"{step:.0f}",
+        }
+        url = f"{self._range_endpoint}?{urllib.parse.urlencode(params)}"
+        request = urllib.request.Request(url, method="GET", headers={"Accept": "application/json"})
+        try:
+            body = self._fetch(request, MAX_RANGE_RESPONSE_BYTES)
+        except QueryError:
+            raise
+        except (OSError, ValueError, HTTPException) as exc:
+            raise QueryError(f"prometheus request failed: {type(exc).__name__}") from exc
+        return _parse_matrix(body, start, end, step, max_series)
+
+    def _fetch(self, request: urllib.request.Request, limit: int | None = None) -> bytes:
         # Two bounds on the whole exchange, because the socket timeout only bounds
         # one receive and a hostile or broken server can stay under it forever:
         # 1. the body loop below, which checks a deadline between receives;
         # 2. a watchdog that shuts the socket down shortly after, which is the
         #    only thing that can stop a server dribbling the HEADERS (urllib is
         #    inside getresponse() and never returns to our loop).
+        limit = MAX_RESPONSE_BYTES if limit is None else limit
         deadline = time.monotonic() + self._timeout
         watch = _Watch()
         request.watch = watch  # type: ignore[attr-defined]  # read by the Watched* handlers
@@ -268,7 +329,7 @@ class PrometheusQuery:
                             raise QueryError("prometheus response too slow")
                         return b"".join(chunks)
                     total += len(chunk)
-                    if total > MAX_RESPONSE_BYTES:
+                    if total > limit:
                         raise QueryError("prometheus response too large")
                     chunks.append(chunk)
         except (OSError, HTTPException, ValueError) as exc:
@@ -302,7 +363,9 @@ def _endpoint(base_url: str) -> str:
     return f"{parts.scheme}://{parts.netloc}{parts.path.rstrip('/')}/api/v1/query"
 
 
-def _parse_vector(body: bytes) -> list[Sample]:
+def _result_list(body: bytes, result_type: str, what: str) -> list[Any]:
+    """The `result` list of a successful answer of the given resultType. Every
+    message is a fixed string: no body or label text ever ends up in a log."""
     try:
         doc = json.loads(body.decode("utf-8"), parse_constant=_reject_constant)
     except (UnicodeDecodeError, ValueError, RecursionError) as exc:
@@ -310,11 +373,16 @@ def _parse_vector(body: bytes) -> list[Sample]:
     if not isinstance(doc, dict) or doc.get("status") != "success":
         raise QueryError("prometheus answer is not a success")
     data = doc.get("data")
-    if not isinstance(data, dict) or data.get("resultType") != "vector":
-        raise QueryError("prometheus answer is not an instant vector")
+    if not isinstance(data, dict) or data.get("resultType") != result_type:
+        raise QueryError(f"prometheus answer is not {what}")
     result = data.get("result")
     if not isinstance(result, list):
         raise QueryError("prometheus answer has no result list")
+    return result
+
+
+def _parse_vector(body: bytes) -> list[Sample]:
+    result = _result_list(body, "vector", "an instant vector")
     if len(result) > MAX_SERIES:
         raise QueryError("prometheus answer has too many series")
     samples = []
@@ -323,6 +391,61 @@ def _parse_vector(body: bytes) -> list[Sample]:
         if sample is not None:
             samples.append(sample)
     return samples
+
+
+def _labels(metric: dict[Any, Any]) -> dict[str, Any]:
+    return {
+        k: v[:MAX_LABEL_VALUE]
+        for k, v in list(metric.items())[:MAX_LABELS]
+        if isinstance(k, str) and isinstance(v, str) and len(k) <= 128
+    }
+
+
+def _parse_matrix(
+    body: bytes, start: float, end: float, step: float, max_series: int
+) -> list[RangeSeries]:
+    """A range answer, or QueryError. A malformed series or point is dropped (a
+    gap); too many series, or more points than the window and step allow, is
+    refused as a whole: that server is not Prometheus."""
+    result = _result_list(body, "matrix", "a range matrix")
+    if len(result) > max_series:
+        raise QueryError("prometheus answer has too many series")
+    per_series = int((end - start) // step) + 1 + RANGE_POINT_MARGIN
+    total = 0
+    series: list[RangeSeries] = []
+    for item in result:
+        if not isinstance(item, dict):
+            continue
+        metric, values = item.get("metric"), item.get("values")
+        if not isinstance(metric, dict) or not isinstance(values, list):
+            continue
+        # Counted before anything is dropped: a hostile server cannot hide points.
+        total += len(values)
+        if len(values) > per_series or total > per_series * RANGE_TOTAL_FACTOR:
+            raise QueryError("prometheus answer has too many points")
+        points: dict[float, float] = {}
+        for pair in values:
+            point = _parse_point(pair, start, end)
+            if point is not None:
+                points.setdefault(point[0], point[1])
+        series.append(RangeSeries(_labels(metric), tuple(sorted(points.items()))))
+    return series
+
+
+def _parse_point(pair: Any, start: float, end: float) -> tuple[float, float] | None:
+    """(timestamp, value), or None for a gap: bad shape, a timestamp outside the
+    asked window, or a value that is not a plain finite number (NaN means "none")."""
+    if not isinstance(pair, list) or len(pair) != 2:
+        return None
+    ts, text = pair
+    if isinstance(ts, bool) or not isinstance(ts, int | float) or not math.isfinite(ts):
+        return None
+    if not start <= ts <= end:
+        return None
+    if not isinstance(text, str) or len(text) > 64 or not _NUMBER.fullmatch(text):
+        return None
+    value = float(text)
+    return (float(ts), value) if math.isfinite(value) else None
 
 
 def _parse_sample(item: Any) -> Sample | None:
@@ -339,12 +462,7 @@ def _parse_sample(item: Any) -> Sample | None:
     value = float(text)
     if not math.isfinite(value):
         return None
-    labels = {
-        k: v[:MAX_LABEL_VALUE]
-        for k, v in list(metric.items())[:MAX_LABELS]
-        if isinstance(k, str) and isinstance(v, str) and len(k) <= 128
-    }
-    return Sample(labels=labels, value=value)
+    return Sample(labels=_labels(metric), value=value)
 
 
 # ---- the snapshot ------------------------------------------------------------------

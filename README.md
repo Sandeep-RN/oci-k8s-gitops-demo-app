@@ -22,6 +22,7 @@ serves a static landing page (`backend/app/static/index.html`, wired in
 | `POST /api/links` `{"url": "https://..."}` with `Authorization: Bearer <token>` | `201 {code, url, created_at}`; `401` with `WWW-Authenticate: Bearer` if the token is missing or unknown; `422` unless the URL is http(s) and at most 2048 characters |
 | `GET /` | The landing page: static HTML with one inline script (the live status strip), nothing loaded from elsewhere (a strict `Content-Security-Policy` allows exactly that script's hash and same-origin fetches), `Cache-Control: public, max-age=300`. Not part of the redirect SLO: its metric route is `/` |
 | `GET /api/status` | Live platform data (below): `200` with rounded aggregates and `Cache-Control: public, max-age=15`, `200 {"available": false}` with `Cache-Control: no-store` until a first refresh succeeds (never a 5xx: public clients would trip the server-error alert), `404` when the feature is off. Takes no parameters |
+| `GET /status` | History charts (below), only when `STATUS_HISTORY=on`; otherwise `404`. A server-rendered HTML page with inline SVG and no script at all (`Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`). `200` with `Cache-Control: public, max-age=60`, or `200` "charts are warming up" with `no-store` until a first refresh succeeds (never a 5xx). Takes no parameters |
 | `GET /{code}` | `302` to the stored URL with `Cache-Control: no-store`, or `404`. No token needed |
 | `GET /api/links/{code}` | `200 {code, url, created_at}`, or `404`. No token needed |
 | `GET /healthz` | Liveness: `200` whenever the process runs. Never checks the database |
@@ -73,6 +74,28 @@ serves a static landing page (`backend/app/static/index.html`, wired in
   the tab is visible and treats `available: false` like a failed fetch; with JavaScript off it shows "Live data unavailable".
   Two extra metrics on the app port's registry: `status_refresh_failures_total`
   and `status_snapshot_age_seconds` (-1 until the first success).
+- **History charts (`/status`, ADR 0027, demo issue #235)** are OFF until
+  `STATUS_HISTORY=on` AND `STATUS_PROMETHEUS_URL` is valid; otherwise the route
+  does not exist (`404`) and nothing runs. `STATUS_HISTORY_REFRESH_SECONDS`
+  (default 300, from 60 to 900; anything else, `nan` and `inf` included, is
+  warned about and replaced by 300) sets the refresh interval. A second thread
+  asks Prometheus a fixed list of nine range queries (constants in
+  `RANGE_QUERIES` in `backend/app/history.py`: window and step are part of the
+  constant, no request data reaches a query, and no ad hoc range selector is longer
+  than `[5m]`) one after another, with the same client hardening as the strip
+  (2 s per query, watchdog, no redirects or proxies, strict numbers) plus a 128 KiB
+  answer cap, a cap on points per series and in total (more than the window and step
+  allow is refused), and at most 64 series. It keeps ONE snapshot of numbers on a
+  regular time grid (a gap is a gap, never zero) and renders the page once; a
+  failed chart is `no data` on its own and keeps its last good data; a refresh is
+  skipped and counted while the worker of the previous one is alive. The page
+  prints its data time, window and step per chart, how much data a chart has when it
+  is less than its window, and marks deploys (from the backend image tag, shown as
+  7 hex characters after a 40-hex match) on every chart. It is not part of `/healthz`
+  or `/readyz` (ADR 0016). The landing page shows a "History charts" link only when
+  `/api/status` says `history: true`. Two extra metrics on the app port's registry:
+  `status_history_refresh_failures_total` and
+  `status_history_snapshot_age_seconds` (-1 until the first success).
 - **The landing page's example link** is configuration, not code:
   `EXAMPLE_LINK_CODE` names an existing short link in that cluster's
   database, so each cluster sets its own. Unset, the page has no example

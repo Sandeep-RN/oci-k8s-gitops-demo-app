@@ -14,7 +14,7 @@ from app.status import StatusService
 from tests.helpers import AUTH, TOKENS
 from tests.status_helpers import Clock, FakePrometheus
 
-TOP_LEVEL = ["as_of", "stale", "slo", "traffic", "node", "cluster", "delivery"]
+TOP_LEVEL = ["as_of", "stale", "slo", "traffic", "node", "cluster", "delivery", "history"]
 
 
 def make(fake=None, clock=None, **app_kwargs):
