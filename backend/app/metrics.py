@@ -60,6 +60,23 @@ def make_status_metrics(registry: CollectorRegistry) -> tuple[Counter, Gauge]:
     return failures, age
 
 
+def make_history_metrics(registry: CollectorRegistry) -> tuple[Counter, Gauge]:
+    """Metrics of the /status history refresher (demo #235, ADR 0027). Same pattern
+    as make_status_metrics: no labels, age computed at scrape time (-1: none yet),
+    not part of the SLO, and different names so both can share one registry."""
+    failures = Counter(
+        "status_history_refresh_failures",
+        "History refreshes in which at least one range query failed, timed out or was skipped.",
+        registry=registry,
+    )
+    age = Gauge(
+        "status_history_snapshot_age_seconds",
+        "Seconds since the last history refresh that produced a snapshot (-1: none yet).",
+        registry=registry,
+    )
+    return failures, age
+
+
 class RequestMetricsMiddleware:
     """Pure ASGI middleware, so it sees the final status even for unhandled errors."""
 

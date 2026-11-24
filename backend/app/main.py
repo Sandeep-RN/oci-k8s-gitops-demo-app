@@ -12,8 +12,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from prometheus_client import REGISTRY, CollectorRegistry
 from pydantic import AfterValidator, AnyHttpUrl, BaseModel
 
-from app import docs_page, landing, links
+from app import docs_page, history_page, landing, links
 from app.auth import DirectoryTokens, NoTokens, TokenSource, match_token
+from app.history import HistoryService, history_from_env
 from app.links import (
     CodeCollision,
     InMemoryLinkStore,
@@ -96,13 +97,21 @@ class LinkOut(BaseModel):
 
 
 def _with_status_refresher(
-    inner: Callable[[FastAPI], AsyncIterator[None]] | None, service: StatusService
+    inner: Callable[[FastAPI], AsyncIterator[None]] | None,
+    service: StatusService | HistoryService | Sequence[StatusService | HistoryService],
 ) -> Callable[[FastAPI], AsyncIterator[None]]:
-    """Run the status refresher thread around the caller's lifespan (if any)."""
+    """Run the refresher thread(s) around the caller's lifespan (if any): the live
+    status strip's and the history charts' (demo #230, #235)."""
+    services = [service] if hasattr(service, "start") else list(service)  # type: ignore[arg-type]
+
+    def stop_all() -> None:
+        for s in services:
+            s.stop()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        service.start()
+        for s in services:
+            s.start()
         try:
             if inner is None:
                 yield
@@ -111,7 +120,7 @@ def _with_status_refresher(
                     yield
         finally:
             # join() can wait a moment for an in-flight refresh: not on the loop.
-            await asyncio.to_thread(service.stop)
+            await asyncio.to_thread(stop_all)
 
     return lifespan
 
@@ -125,6 +134,7 @@ def create_app(
     create_mode: str = CREATE_MODE_TOKEN,
     example_code: str | None = None,
     status_service: StatusService | None = None,
+    history_service: HistoryService | None = None,
 ) -> FastAPI:
     _check_create_mode(create_mode)
     store = store if store is not None else InMemoryLinkStore()
@@ -134,8 +144,9 @@ def create_app(
     # /openapi.json are switched off. Old /docs needs no redirect: it is not a
     # valid 7-character code, so the /{code} route already answers a plain 404.
     # ReDoc is dropped; one docs UI is enough.
-    if status_service is not None:
-        lifespan = _with_status_refresher(lifespan, status_service)
+    background = [s for s in (status_service, history_service) if s is not None]
+    if background:
+        lifespan = _with_status_refresher(lifespan, background)
     app = FastAPI(
         title="link-shortener",
         lifespan=lifespan,
@@ -254,7 +265,27 @@ def create_app(
             if snapshot is None:
                 # 200, not 5xx: see NOT_YET. The page treats available=false as no data yet.
                 return JSONResponse(NOT_YET, headers={"Cache-Control": "no-store"})
-            return JSONResponse(snapshot, headers={"Cache-Control": STATUS_CACHE_CONTROL})
+            # `history` tells the landing strip whether /status exists, so the link
+            # to it never points at a 404 (demo #235).
+            payload = {**snapshot, "history": history_service is not None}
+            return JSONResponse(payload, headers={"Cache-Control": STATUS_CACHE_CONTROL})
+
+    # History charts (demo #235, ADR 0027). Registered only when STATUS_HISTORY=on and
+    # the Prometheus URL is valid; otherwise "/status" falls through to /{code}, which
+    # answers a plain 404 (6 characters can never be a 7-character code). Registered
+    # BEFORE /{code} so it wins. It reads a string from memory: no Prometheus call, no
+    # parameters, and not part of /healthz or /readyz (ADR 0016). Before the first
+    # refresh it answers 200 "warming up", never a 5xx (a public 5xx feeds the Traefik
+    # error alert).
+    if history_service is not None:
+        warming_html = history_page.render_warming()
+
+        @app.api_route("/status", methods=["GET", "HEAD"], include_in_schema=False)
+        async def history_charts() -> HTMLResponse:
+            page = history_service.page()
+            if page is None:
+                return HTMLResponse(warming_html, headers=history_page.headers(ready=False))
+            return HTMLResponse(page, headers=history_page.headers(ready=True))
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def landing_page() -> HTMLResponse:
@@ -349,6 +380,8 @@ def create_production_app() -> FastAPI:
         example_code=os.environ.get("EXAMPLE_LINK_CODE", "").strip(),
         # None (feature off) unless STATUS_PROMETHEUS_URL is set and valid.
         status_service=service_from_env(os.environ, REGISTRY),
+        # None (off) unless STATUS_HISTORY=on and the same Prometheus URL is valid.
+        history_service=history_from_env(os.environ, REGISTRY),
     )
 
 

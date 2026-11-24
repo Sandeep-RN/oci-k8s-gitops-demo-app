@@ -108,3 +108,38 @@ class RedirectServer:
         self._server.shutdown()
         self._server.server_close()
         self._thread.join(5)
+
+
+class BodyServer:
+    """Answers every GET with one fixed body (demo #235: range answers over a real
+    socket). `seen` holds the request targets, so a test can check the exact query
+    string that went over the wire."""
+
+    def __init__(self, body: bytes, status: int = 200) -> None:
+        self.seen: list[str] = []
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                outer.seen.append(self.path)
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except OSError:
+                    pass  # the client hung up on an oversized body: expected
+
+            def log_message(self, *args):
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._server.server_port}"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(5)
