@@ -288,7 +288,8 @@ def test_the_landing_script_shows_the_link_only_when_history_is_exactly_true():
     html = TestClient(create_app()).get("/").text
     script = html.split("<script>")[1].split("</script>")[0]
     assert "history === true" in script
-    assert "'/status'" in script and "'History charts'" in script
+    assert "'/status'" in script and "'See the charts'" in script
+    assert "nav-metrics" in script  # the nav link is revealed by the same flag
     assert "innerHTML" not in script
     urls = re.findall(r"https?://[^\s'\"]+", script)
     assert urls == ["https://github.com/Sandeep-RN/oci-k8s-gitops-demo-app/commit/"]
@@ -334,3 +335,22 @@ def test_every_refresher_is_stopped_even_when_a_later_one_fails_to_start():
     else:
         raise AssertionError("the start failure must propagate")
     assert first.started and first.stopped == 1 and second.stopped == 1
+
+
+def test_the_landing_nav_has_a_hidden_metrics_link_without_an_address():
+    html = TestClient(create_app()).get("/").text
+    nav = re.search(r"<nav.*?</nav>", html, re.DOTALL).group(0)
+    link = re.search(r'<a[^>]*id="nav-metrics"[^>]*>([^<]*)</a>', nav)
+    assert link, "the nav must carry the Metrics link"
+    assert "hidden" in link.group(0) and "href" not in link.group(0)  # never a link to a 404
+    assert link.group(1) == "Metrics"
+
+
+def test_the_metrics_page_is_named_platform_metrics():
+    client, service, _, _, _ = make()
+    service.refresh_once()
+    html = client.get("/status").text
+    assert "<title>Platform metrics: demo.sandeeprn.in</title>" in html
+    assert "<h1>Platform metrics</h1>" in html
+    assert re.search(r'<a href="/status" aria-current="page">Metrics</a>', html)
+    assert "History" not in html.split("<main")[0]  # no old name in the head or nav

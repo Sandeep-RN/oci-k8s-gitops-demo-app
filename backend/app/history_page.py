@@ -557,12 +557,12 @@ _HEAD = (
     '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
     '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
     '<meta name="color-scheme" content="light dark">\n'
-    "<title>Platform history: demo.sandeeprn.in</title>\n"
+    "<title>Platform metrics: demo.sandeeprn.in</title>\n"
     f"<style>{_CSS}</style>\n</head>\n<body>\n"
     '<header>\n  <nav class="wrap" aria-label="Main">\n'
     '    <a class="brand" href="/">demo.sandeeprn.in</a>\n'
     '    <a href="/">Link shortener</a>\n'
-    '    <a href="/status" aria-current="page">History</a>\n'
+    '    <a href="/status" aria-current="page">Metrics</a>\n'
     '    <a href="/api/docs">API docs</a>\n'
     '    <a href="https://ask.sandeeprn.in">On-call assistant</a>\n'
     '    <a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo">Source</a>\n'
@@ -578,7 +578,7 @@ def render_warming() -> str:
     """Before the first successful refresh: a plain 200 page, never a 5xx."""
     return (
         _HEAD
-        + "<h1>Platform history</h1>\n"
+        + "<h1>Platform metrics</h1>\n"
         + '<p class="lead">The charts are warming up, try again in a minute.</p>\n'
         + '<p class="data-note">The page keeps a copy of the last day and week from the '
         "platform's own Prometheus. It fills a few minutes after the service starts.</p>\n" + _FOOT
@@ -650,7 +650,7 @@ def render_page(
     refresh = _words(refresh_seconds) if math.isfinite(refresh_seconds) else "a few minutes"
     return (
         _HEAD
-        + "<h1>Platform history</h1>\n"
+        + "<h1>Platform metrics</h1>\n"
         + '<p class="lead">How the platform behaved over the last day and week, drawn from '
         "its own Prometheus.</p>\n"
         + banner
