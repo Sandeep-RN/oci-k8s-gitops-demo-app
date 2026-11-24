@@ -92,7 +92,7 @@ serves a static landing page (`backend/app/static/index.html`, wired in
   prints its data time, window and step per chart, how much data a chart has when it
   is less than its window, and marks deploys (from the backend image tag, shown as
   7 hex characters after a 40-hex match) on every chart. It is not part of `/healthz`
-  or `/readyz` (ADR 0016). The landing page shows a "History charts" link only when
+  or `/readyz` (ADR 0016). The landing page shows a "Metrics" nav link and a "See the charts" link only when
   `/api/status` says `history: true`. Two extra metrics on the app port's registry:
   `status_history_refresh_failures_total` and
   `status_history_snapshot_age_seconds` (-1 until the first success).

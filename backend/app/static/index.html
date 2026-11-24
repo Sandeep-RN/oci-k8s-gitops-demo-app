@@ -76,6 +76,7 @@
   <nav class="wrap" aria-label="Main">
     <a class="brand" href="/">demo.sandeeprn.in</a>
     <a href="/">Link shortener</a>
+    <a id="nav-metrics" hidden>Metrics</a>
     <a href="/api/docs">API docs</a>
     <a href="https://ask.sandeeprn.in">On-call assistant</a>
     <a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo">Source</a>
@@ -191,11 +192,16 @@ a 7-day service level objective for the redirects and alerts when it burns too f
     // History charts (demo #235): the server says whether /status exists, so the
     // link never points at a 404. Constants only; nothing from the data is written.
     var hist = el('t-history');
+    var navMetrics = el('nav-metrics');
     if (d.history === true) {
-      hist.textContent = 'History charts';
+      hist.textContent = 'See the charts';
       hist.href = HISTORY_URL;
       hist.hidden = false;
+      navMetrics.href = HISTORY_URL;
+      navMetrics.hidden = false;
     } else {
+      navMetrics.hidden = true;
+      navMetrics.removeAttribute('href');
       hist.hidden = true;
       hist.removeAttribute('href');
     }
