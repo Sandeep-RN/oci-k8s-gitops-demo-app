@@ -5,12 +5,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /srv
 
 # Pull in Debian security fixes the floating base tag has not caught up with yet
-# (Trivy gate, demo #112: zlib1g HIGH CVEs with a fix available). Scoped to the
-# one package so builds stay predictable; delete this layer once the upstream
-# python image ships the fix. Runs as root, before USER, and leaves no apt lists.
-# Re-tested 2026-11-17 on python:3.15-slim (Debian 13.7): still needed, the scan
-# fails on zlib1g (CVE-2026-85091) without it (demo #187).
-RUN apt-get update     && apt-get install -y --no-install-recommends --only-upgrade zlib1g     && rm -rf /var/lib/apt/lists/*
+# (the Trivy gate). Scoped to the named package so builds stay predictable;
+# delete this layer once the upstream python image ships the fix. Runs as root,
+# before USER, and leaves no apt lists.
+# 2026-11-27, python:3.15-slim (Debian 13.8): the scan fails on libzstd1
+# (CVE-2026-124851, HIGH, fixed in 1.5.7+dfsg-1+deb13u1) without this. The same
+# test showed the earlier zlib1g upgrade (demo #112, #187) is no longer needed:
+# the base now ships that fix and the scan passes without it.
+RUN apt-get update     && apt-get install -y --no-install-recommends --only-upgrade libzstd1     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 # pip is removed in the SAME layer as the install, so no layer keeps it. The
