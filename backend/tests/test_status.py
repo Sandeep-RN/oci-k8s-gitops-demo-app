@@ -26,7 +26,7 @@ EXPECTED_QUERIES = {
     "slo:redirect_latency_good:ratio_rate7d",
     "slo:redirect_requests:rate5m",
     '1-avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))',
-    "1-node_memory_MemAvailable_bytes/node_memory_MemTotal_bytes",
+    "avg(1-node_memory_MemAvailable_bytes/node_memory_MemTotal_bytes)",
     'sum(rate(node_network_transmit_bytes_total{device!~"lo|veth.*|cni.*|flannel.*"}[5m]))',
     'count(kube_pod_status_phase{phase="Running"}==1)',
     'kube_pod_container_info{namespace="link-shortener",container="backend",pod=~"backend-.*"}',
@@ -525,6 +525,45 @@ def test_a_failed_query_is_logged_with_its_fixed_message_and_a_foreign_error_by_
     assert "prometheus response too slow" in caplog.text
     assert "RuntimeError" in caplog.text
     assert "CANARY-SECRET" not in caplog.text  # only QueryError messages are known-safe
+
+
+def test_a_failed_query_does_not_keep_its_parsed_answer_alive_during_the_refresh(monkeypatch):
+    # Same finding as the history fix (PR #45/#46): a stored exception keeps its
+    # traceback, and the traceback keeps the frame that held the parsed body. With
+    # one worker the queries run one after another, so at the start of each query
+    # no earlier query's frame may still be alive.
+    import gc
+    import weakref
+
+    monkeypatch.setattr(status, "QUERY_WORKERS", 1)
+
+    class Big:
+        pass
+
+    refs = []
+    leaked = []
+
+    def failing(promql):
+        gc.collect()
+        leaked.extend(r for r in refs if r() is not None)
+        big = Big()  # stands for the parsed body in the frame of the failing parser
+        refs.append(weakref.ref(big))
+        raise status.QueryError("too many series")
+
+    service, _, _ = make_service(failing)
+    service.refresh_once()
+    assert len(refs) == len(status.QUERIES)
+    assert leaked == [], "an earlier query's frame is still alive"
+
+
+def test_the_instant_memory_query_is_aggregated_and_one_sample_gives_the_number():
+    # Order-dependence fix: a second node-exporter series (a replaced pod) must not
+    # make the number depend on which series Prometheus lists first.
+    assert status.Q_NODE_MEMORY.startswith("avg(")
+    assert status._scalar([Sample(labels={}, value=0.25)]) == 0.25
+    service, _, _ = make_service()
+    service.refresh_once()
+    assert service.read()["node"]["mem_ratio"] == 0.375
 
 
 # ---- the background thread ------------------------------------------------------
