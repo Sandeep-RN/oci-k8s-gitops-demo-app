@@ -199,3 +199,15 @@ def test_root_is_mobile_friendly(client):
     html = client.get("/").text
     assert 'name="viewport"' in html
     assert "@media (max-width" in html
+
+
+def test_root_hard_codes_no_project_counts(client):
+    # demo #264: counts typed into the page went stale within a day. The cards
+    # keep their links; the sources do the counting.
+    html = client.get("/").text
+    assert "The project in numbers" not in html
+    assert "Numbers counted" not in html
+    cards = html.split('<ul class="proof">')[1].split("</ul>")[0]
+    assert not re.search(r"\d", re.sub(r"<[^>]+>", " ", cards))
+    for repo in REPOS:
+        assert f'href="{repo}/pulls?q=is%3Apr+is%3Amerged"' in cards
