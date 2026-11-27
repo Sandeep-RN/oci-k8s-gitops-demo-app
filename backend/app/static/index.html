@@ -35,7 +35,7 @@
            grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); }
   .proof li { margin: 0; padding: .75rem 1rem; border: 1px solid var(--line); border-radius: 8px;
               background: var(--card); }
-  .proof .n { display: block; font-size: 2rem; font-weight: 700; line-height: 1.1; }
+  .proof .t { display: block; font-weight: 700; margin-bottom: .25rem; }
   .proof .l { color: var(--muted); font-size: .85rem; }
   .live { list-style: none; padding: 0; margin: .5rem 0 0; display: grid; gap: .75rem;
           grid-template-columns: repeat(auto-fit, minmax(10.5rem, 1fr)); }
@@ -63,8 +63,7 @@
   svg .zone { fill: none; stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 5 4; }
   svg .arrow { stroke: var(--muted); stroke-width: 1.6; fill: none; }
   svg .head { fill: var(--muted); }
-  footer { border-top: 1px solid var(--line); margin-top: 3rem; padding: 1rem 0 2rem;
-           color: var(--muted); font-size: .85rem; }
+  main.wrap { padding-bottom: 3rem; }
   @media (max-width: 40rem) {
     h1 { font-size: 1.5rem; }
     nav .brand { flex-basis: 100%; }
@@ -336,19 +335,20 @@ this is not high availability; the decisions behind it are in the
 <a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo/tree/main/docs/adr">ADRs</a>.</figcaption>
 </figure>
 
-<h2>The project in numbers</h2>
+<h2>Check it yourself</h2>
+<!-- No counts here (demo #264): typed numbers went stale; the linked pages count. -->
 <ul class="proof">
-  <li><a class="n" href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo/tree/main/docs/adr">26</a>
-    <span class="l">architecture decision records</span></li>
-  <li><a class="n" href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo/tree/main/docs/runbooks">9</a>
-    <span class="l">runbooks</span></li>
-  <li><a class="n" href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo/blob/main/docs/runbooks/postgres-backup-restore.md">3</a>
-    <span class="l">database restores (a drill, the cluster move, the rebuild)</span></li>
-  <li><a class="n" href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo/pulls?q=is%3Apr+is%3Amerged">231</a>
-    <span class="l">merged pull requests, counted 2026-11-24:
-    <a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo/pulls?q=is%3Apr+is%3Amerged">demo 79</a>,
-    <a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo-app/pulls?q=is%3Apr+is%3Amerged">app 40</a>,
-    <a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo-gitops/pulls?q=is%3Apr+is%3Amerged">gitops 112</a></span></li>
+  <li><a class="t" href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo/tree/main/docs/adr">Architecture decisions</a>
+    <span class="l">each choice, why it was made and what it cost</span></li>
+  <li><a class="t" href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo/tree/main/docs/runbooks">Runbooks</a>
+    <span class="l">what to check when something breaks</span></li>
+  <li><a class="t" href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo/blob/main/docs/runbooks/postgres-backup-restore.md">Backup and restore</a>
+    <span class="l">nightly database dumps and how to restore one</span></li>
+  <li><span class="t">Merged pull requests</span>
+    <span class="l">
+    <a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo/pulls?q=is%3Apr+is%3Amerged">docs and infrastructure</a>,
+    <a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo-app/pulls?q=is%3Apr+is%3Amerged">application</a>,
+    <a href="https://github.com/Sandeep-RN/oci-k8s-gitops-demo-gitops/pulls?q=is%3Apr+is%3Amerged">manifests</a></span></li>
 </ul>
 
 <h2>What is inside</h2>
@@ -379,6 +379,5 @@ this is not high availability; the decisions behind it are in the
     Kubernetes manifests that Argo CD deploys</li>
 </ul>
 </main>
-<footer><div class="wrap">Numbers counted from the repositories on 2026-11-24; each links to its source.</div></footer>
 </body>
 </html>
